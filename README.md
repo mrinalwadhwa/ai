@@ -1,3 +1,3 @@
 # AI
 
-Tools and resources for working with AI agents.
+Skills, expertise, and configuration for working with AI agents.

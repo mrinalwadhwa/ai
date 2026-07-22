@@ -1,4 +1,4 @@
-# Agent instructions
+# Instructions for agents working on this repository
 
 ## Worktrees
 
@@ -31,4 +31,4 @@ artifacts, phase or run identifiers, or test and file counts.
 When a body is useful, separate it with a blank line and wrap it at 72 characters. Explain what changed and why.
 Use bullets for distinct changes.
 
-Do not add `Co-Authored-By` trailers.
+Do not add yourself or another AI agent as a co-author. Do not add a `Co-Authored-By` trailer naming an AI agent.
