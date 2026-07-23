@@ -1,0 +1,4 @@
+interface:
+  display_name: "Save Conversation"
+  short_description: "Save durable project conversation state"
+  default_prompt: "Use $save-conversation to save this conversation for a later agent session."

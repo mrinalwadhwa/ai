@@ -1,0 +1,4 @@
+interface:
+  display_name: "Resume Conversation"
+  short_description: "Load saved project conversation state"
+  default_prompt: "Use $resume-conversation to load the relevant saved conversation for this project."
