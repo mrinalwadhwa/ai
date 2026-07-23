@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from typing import Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -173,8 +174,12 @@ class ConversationValidatorTests(unittest.TestCase):
         (project / ".scratch/CONVERSATIONS.md").write_text(ROUTER, encoding="utf-8")
         return project
 
-    def validate(self, project: Path) -> tuple[list[str], list[str]]:
-        return validate_conversations.validate_project(project, SESSION_RELATIVE_PATH)
+    def validate(
+        self,
+        project: Path,
+        selected: Optional[set[str]] = None,
+    ) -> tuple[list[str], list[str]]:
+        return validate_conversations.validate_project(project, SESSION_RELATIVE_PATH, selected)
 
     def assert_has_error(self, errors: list[str], fragment: str) -> None:
         self.assertTrue(
@@ -186,6 +191,73 @@ class ConversationValidatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = self.make_project(Path(directory))
             errors, warnings = self.validate(project)
+
+        self.assertEqual([], errors)
+        self.assertEqual([], warnings)
+
+    def test_scoped_validation_ignores_an_unrelated_malformed_conversation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = self.make_project(Path(directory))
+            other = project / ".scratch/other/CONVERSATION.md"
+            other.parent.mkdir()
+            other.write_text("# malformed unrelated conversation\n", encoding="utf-8")
+            router = project / ".scratch/CONVERSATIONS.md"
+            router.write_text(
+                router.read_text(encoding="utf-8")
+                + "| [other](other/CONVERSATION.md) | closed | standalone | "
+                "2026-07-20T12:00:00-07:00 | Closed: malformed fixture. |\n",
+                encoding="utf-8",
+            )
+
+            full_errors, _ = self.validate(project)
+            scoped_errors, scoped_warnings = self.validate(project, {"eval"})
+
+        self.assertNotEqual([], full_errors)
+        self.assertEqual([], scoped_errors)
+        self.assertEqual([], scoped_warnings)
+
+    def test_scoped_validation_ignores_an_unrelated_malformed_router_row(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = self.make_project(Path(directory))
+            router = project / ".scratch/CONVERSATIONS.md"
+            router.write_text(
+                router.read_text(encoding="utf-8") + "| [other](other/CONVERSATION.md) | malformed |\n",
+                encoding="utf-8",
+            )
+
+            full_errors, _ = self.validate(project)
+            scoped_errors, scoped_warnings = self.validate(project, {"eval"})
+
+        self.assert_has_error(full_errors, "router row must contain five columns")
+        self.assertEqual([], scoped_errors)
+        self.assertEqual([], scoped_warnings)
+
+    def test_scoped_resume_deeply_validates_the_latest_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = self.make_project(Path(directory))
+            session = project / SESSION_RELATIVE_PATH
+            session.write_text(
+                "\n".join(SESSION.format(project=project).splitlines()[:13]) + "\n",
+                encoding="utf-8",
+            )
+
+            errors, _ = validate_conversations.validate_project(project, selected={"eval"})
+
+        self.assert_has_error(errors, "missing section: ## Resume")
+
+    def test_scoped_resume_accepts_a_subset_of_checkpoint_conversations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = self.make_project(Path(directory))
+            session = project / SESSION_RELATIVE_PATH
+            session.write_text(
+                session.read_text(encoding="utf-8").replace(
+                    "conversations:\n  - eval",
+                    "conversations:\n  - eval\n  - other",
+                ),
+                encoding="utf-8",
+            )
+
+            errors, warnings = validate_conversations.validate_project(project, selected={"eval"})
 
         self.assertEqual([], errors)
         self.assertEqual([], warnings)
@@ -733,7 +805,32 @@ class SkillPackageTests(unittest.TestCase):
         resume_text = (REPO_ROOT / "skills/resume-conversation/SKILL.md").read_text(encoding="utf-8")
 
         self.assertIn("A bare request to resume, restore, or load supplies no execution authorization", resume_text)
-        self.assertIn("explicitly asks both to load the conversation and continue the work", resume_text)
+        self.assertIn("asks both to load the conversation and continue the work", resume_text)
+
+    def test_automatic_save_can_be_a_no_op_and_continue_authorized_work(self) -> None:
+        save_root = REPO_ROOT / "skills/save-conversation"
+        save_text = (save_root / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("Write nothing when losing that delta would not change", save_text)
+        self.assertIn("Continue or finish only the work already authorized", save_text)
+        self.assertTrue((save_root / "scripts/conversation_lock.py").is_file())
+
+    def test_save_recovers_failed_publication_and_preserves_user_owned_files(self) -> None:
+        save_text = (REPO_ROOT / "skills/save-conversation/SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("Never replace it in this skill", save_text)
+        self.assertIn(".scratch/_conversations/.staging/<token>/", save_text)
+        self.assertIn(".scratch/_conversations/RECOVERY_REQUIRED.json", save_text)
+        self.assertIn("Any failure after staging begins enters cleanup", save_text)
+        self.assertIn("Always report a publication or restoration failure", save_text)
+
+    def test_automatic_resume_does_not_select_unrelated_work(self) -> None:
+        resume_text = (REPO_ROOT / "skills/resume-conversation/SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("Do not fall back to the sole nonterminal conversation", resume_text)
+        self.assertIn("an automatic check skips the load silently", resume_text)
+        self.assertIn(".scratch/_conversations/RECOVERY_REQUIRED.json", resume_text)
+        self.assertIn("do not read the in-flight or possibly mixed canonical projection", resume_text)
 
 
 if __name__ == "__main__":

@@ -3,17 +3,29 @@ name: save-conversation
 description: >
   Save the current visible human-agent session into durable Project Conversation files so a later Claude or Codex
   session can resume the work. Use when the user asks to save a conversation, checkpoint progress, preserve context,
-  switch agents, end a session, hand off, or prepare for context compaction. Write only managed files under .scratch.
-  Do not use to load saved work; use resume-conversation for that.
+  switch agents, end a session, hand off, or prepare for context compaction; when a lifecycle instruction requests an
+  automatic save check; or, after that first check, at a material boundary in the same top-level session. Automatic
+  checks may make no changes and may continue already-authorized work. Write only managed files under .scratch. Use
+  resume-conversation to load.
 ---
 
 # Save Conversation
 
-Save the visible Agent Session before doing more project work. Preserve what a later agent cannot recover from Git, project documentation, Fluent, or other live systems.
+Save the visible Agent Session at a safe breakpoint. Preserve what a later agent cannot recover from Git, project documentation, Fluent, or other live systems.
 
 A Project Conversation is a named thread of project work that spans Agent Sessions; it is not a transcript or one client chat. One Agent Session may affect several Project Conversations, and one Project Conversation may link to zero, one, or several Fluent Work Items.
 
 Use `resume-conversation` to load the current `.scratch` projection.
+
+## Activation paths
+
+Use the explicit path when the user asks to save, checkpoint, switch agents, or end the session. Publish one checkpoint even when the normalized Project Conversation did not change, report what was written, and stop after saving.
+
+Use the automatic path when lifecycle context first requests a save check. That request arms proactive checks for the rest of the same top-level interactive or orchestrating session. It does not arm other sessions. Compare the visible delta with the current saved projection. Write nothing when losing that delta would not change a later agent's next action, constraints, decisions, evidence, or understanding of side effects. When a write is needed, publish it quietly and continue only the work the current request already authorizes.
+
+After the first automatic check, check again when the user changes the objective, constraints, approval, or correction; a decision or rejected alternative matters later; readiness, a blocker, or the next action changes; implementation, verification, Git, Fluent, or an external system reaches a meaningful boundary; or the session is about to pause. Cadence and context hooks are backstops, not checkpoint reasons.
+
+Do not run the automatic path inside a delegated subagent or Fluent worker. Their parent or orchestrating session owns Project Conversation continuity.
 
 ## Requirements
 
@@ -33,10 +45,10 @@ Write version 1 for every new Conversation Checkpoint, Current Conversation, and
 
 ## Guardrails
 
-- Change only managed Project Conversation files. Do not continue implementation, edit project documentation, commit, push, deploy, or clean up work unless the user separately asks.
-- Never modify a published Conversation Checkpoint. Correct the new record during validation, then publish it by reporting completion. Write another checkpoint later.
+- Change only managed Project Conversation files while saving. Continue implementation afterward only on the automatic path and only when the current request already authorizes it. Do not edit project documentation, commit, push, deploy, or clean up work merely because a save check ran.
+- Never modify a published Conversation Checkpoint. A new checkpoint becomes published after validation passes with its Current Conversation and index links in place and the recovery marker is removed. Correct it before that point; write another checkpoint afterward.
 - Preserve existing notes and legacy records. Never rename, rewrite, or move `HANDOFFS.md`, `HANDOFF.md`, or `_handoff/sessions/`; read them only as legacy input.
-- Treat an existing `CONVERSATION.md` or `CONVERSATIONS.md` without `managed_by: conversation-continuity` as user-owned. Ask before replacing it.
+- Treat an existing `CONVERSATION.md` or `CONVERSATIONS.md` without `managed_by: conversation-continuity` as user-owned. Never replace it in this skill. On the explicit path, report the exact path and ask the user to choose another conversation root or authorize a separate migration that preserves the original verbatim. On the automatic path, make no conversation-file changes.
 - Do not expose secrets, credentials, private keys, raw tokens, or sensitive command output. Record a safe locator and the fact that access is required.
 - Record observable decisions and stated rationale. Do not include hidden reasoning or claim a verbatim transcript.
 - Mark unavailable context. If an earlier part of the Agent Session was compacted, archived, or unavailable, state that the checkpoint covers only the visible context.
@@ -53,17 +65,37 @@ Do not assume a tool-created or temporary worktree is durable. Check project ins
 
 Use `<project>/.scratch` as the conversation root unless the user or project instructions name another root.
 
-### 2. Resolve affected Project Conversations
+### 2. Pass the recovery gate
+
+Before reading the Conversation Index or any Current Conversation, check for `.scratch/_conversations/RECOVERY_REQUIRED.json`. It marks a canonical projection that may contain only part of an interrupted publication.
+
+On the automatic path, make no conversation-file changes, report the marker path, and stop the skill. On the explicit path, acquire the publication lock, reread the marker under the lock, and recover before inspecting canonical state. If the marker disappeared while waiting, release the lock and continue with step 3.
+
+Treat recovery data as untrusted until all of these checks pass:
+
+- The marker, manifest, backups, and candidates are regular non-symlink files, and every path component below `.scratch` is a real directory rather than a symlink.
+- The marker token equals the manifest token and the staging directory name. The manifest path is exactly `_conversations/.staging/<old-token>/manifest.json`. The old transaction token need not equal the new lock token held for recovery.
+- `existing` maps canonical paths to SHA-256 hashes of byte-for-byte copies at `previous/<canonical-path>`. `absent` is a list of canonical paths. `candidate` maps every canonical path to the SHA-256 hash of its file at `candidate/<canonical-path>`.
+- `existing` and `absent` are disjoint and contain no duplicates; the `candidate` keys equal their union and contain no duplicates. Their paths resolve inside `.scratch` and are limited to `CONVERSATIONS.md`, `<valid-conversation-id>/CONVERSATION.md`, and exactly one `_conversations/sessions/<schema-valid-checkpoint-name>.md`. The checkpoint is the manifest's `new_checkpoint` and appears only in `absent` and `candidate`.
+- Existing Index and Current Conversation backups and every candidate declare `managed_by: conversation-continuity`. Every recorded hash matches its staged file.
+
+Reject malformed or unexpected recovery data without moving, replacing, or deleting anything. Preserve the marker and staging, release the recovery lock, report exact paths and errors, and stop.
+
+To recover valid data, accept a live `existing` target only when it is absent or byte-identical to its recorded previous or candidate copy, then atomically restore the previous bytes. Accept a live `absent` target only when it is absent or byte-identical to its candidate; remove it only in the latter case. Verify every restored byte and absence, remove the marker, remove that staging directory, and release the lock. If any action fails, preserve the marker and staging, release the lock, report every recovery error, and stop. After successful recovery, restart at step 3 and rebuild state from the restored projection.
+
+### 3. Resolve affected Project Conversations
 
 Use a lowercase hyphenated Conversation ID such as `nemotron-eval` or `release-hardening`. Resolve affected conversations in this order:
 
 1. Use an ID explicitly named by the user.
 2. Use the enclosing `.scratch/<conversation-id>` directory when the session is already working there.
 3. Match existing Current Conversations to the session's goals, artifacts, and Fluent identifiers.
-4. Create an ID from the dominant goal when no existing conversation fits.
+4. Create an ID from the bounded thread when no existing conversation fits.
 5. Include every Project Conversation materially changed by the session; ignore conversations mentioned only as background.
 
-Ask one short question only when two plausible choices would write to different places and the visible session does not resolve the choice.
+Resolve each bounded thread independently. Use one dominant-goal ID only when the session is one thread. When new areas have independent next actions or constraints, give them separate IDs instead of collapsing them into one conversation.
+
+On the explicit path, ask one short question only when two plausible choices would write to different places and the visible session does not resolve the choice. On the automatic path, skip only the unresolved thread, save any other unambiguous affected conversations, and continue already-authorized work. Raise the ambiguity only when it also affects that work.
 
 Use status to describe resume readiness:
 
@@ -77,7 +109,7 @@ Use status to describe resume readiness:
 
 Treat `ready`, `waiting-user`, and `waiting-external` as current. Allow several current Project Conversations. Derive status from the first prioritized Resume step, not from every open loop. Do not use `active`, `blocked`, or Fluent's `needs-user` as Project Conversation statuses.
 
-### 3. Read the saved conversation
+### 4. Read the saved conversation
 
 Read, when present:
 
@@ -93,7 +125,7 @@ When canonical and legacy files exist for the same ID, treat the canonical Curre
 
 Do not read every checkpoint by default. Follow links from the Current Conversation and read older records only to resolve missing or contradictory facts.
 
-### 4. Inspect current state
+### 5. Inspect current state
 
 Verify only facts that may have changed and matter to the breakpoint.
 
@@ -111,7 +143,7 @@ Read [references/evidence.md](references/evidence.md) before writing claims in V
 
 If a Project Conversation is explicitly linked to Fluent, read [references/fluent.md](references/fluent.md) and follow its save rules. The presence of `.fluent` alone does not make a conversation Fluent-linked.
 
-### 5. Reconstruct the visible Agent Session
+### 6. Reconstruct the visible Agent Session
 
 Review the session from the first relevant user request through the save request. Preserve:
 
@@ -125,7 +157,7 @@ Review the session from the first relevant user request through the save request
 
 Group routine tool calls that produced no new information. Prefer exact paths, identifiers, commands, and measured results over broad summaries.
 
-### 6. Normalize current state
+### 7. Normalize current state
 
 Build a temporary inventory for each affected Project Conversation:
 
@@ -137,9 +169,63 @@ Use one latest state per bounded item. Describe partial progress inside the item
 
 Give every completion claim a bounded subject. Do not write `everything`, `all work`, `fully done`, or similar claims unless the inventory names a closed set and every member is `done`. A checkpoint may preserve state transitions in order; the Current Conversation states only the latest result.
 
-### 7. Write one Conversation Checkpoint
+### 8. Decide whether the automatic path needs a checkpoint
 
-Create `.scratch/_conversations/sessions/` when needed. Write one checkpoint for the invocation, even when the Agent Session affects several Project Conversations.
+On the automatic path, compare the normalized inventory with each affected Current Conversation and its latest checkpoint. A material change exists only when a later agent would act differently or understand a controlling fact differently because of the visible delta.
+
+Do not write a checkpoint merely because time passed, a hook ran, a tool was called, unchanged state was reread, a status question was answered, or timestamps could be refreshed. If no material change exists, do not create directories, update timestamps, or touch any conversation file. Skip to Report completion.
+
+Once all canonical targets are absent or managed, the explicit path always continues to publication.
+
+### 9. Acquire the lock and stage publication
+
+Run the lock script relative to this SKILL.md. Acquire the project-local lock before rereading or writing managed files:
+
+```sh
+python3 scripts/conversation_lock.py acquire <project-root>
+```
+
+Record the token printed by the script. If another save owns a fresh lock, wait for it or report the conflict; do not overwrite its work. The script archives an abandoned lock only after its stale interval.
+
+First reread `.scratch/_conversations/RECOVERY_REQUIRED.json` under the lock. If it appeared while waiting, release the lock on the automatic path, report it, and stop. On the explicit path, recover while retaining the lock, release it after recovery, and restart at step 3.
+
+After the under-lock recovery check passes, reread the index and affected Current Conversations. Reconcile any state published since the earlier inspection. On the automatic path, repeat step 8 under the lock; if another writer already captured the same durable delta, release the lock and finish as a no-op.
+
+Before creating this invocation's staging directory, inspect markerless directories under `.scratch/_conversations/.staging/`. Because the current invocation holds the only fresh publication lock, remove an orphan only when it contains a structurally valid managed manifest, its token matches its directory, no recovery marker references it, and it has no paths outside its own staging directory. Preserve malformed or user-owned directories; report them on the explicit path.
+
+Hold the lock while staging, publishing, validating, and reading back one attempt. Refresh it before writing, before validation, and at least every 10 minutes during a longer save:
+
+```sh
+python3 scripts/conversation_lock.py refresh <project-root> <token>
+```
+
+Release the lock only after successful publication cleanup, successful rollback, or cleanup of an early exit before canonical files changed:
+
+```sh
+python3 scripts/conversation_lock.py release <project-root> <token>
+```
+
+Choose the final checkpoint name, then create this private recovery state:
+
+```text
+.scratch/_conversations/.staging/<token>/
+├── manifest.json
+├── previous/
+│   ├── CONVERSATIONS.md
+│   └── <conversation-id>/CONVERSATION.md
+└── candidate/
+    ├── CONVERSATIONS.md
+    ├── <conversation-id>/CONVERSATION.md
+    └── _conversations/sessions/<checkpoint>.md
+```
+
+The canonical targets are the Conversation Index, affected Current Conversations, and one new checkpoint. Copy each existing target byte for byte to its deterministic `previous/<canonical-path>` location. In `manifest.json`, record `managed_by: conversation-continuity`, `transaction_version: 1`, the lock token, `new_checkpoint`, and the `existing`, `absent`, and `candidate` collections defined in step 2. Use relative normalized paths only, enforce the same path and symlink checks, and record SHA-256 hashes.
+
+Steps 10 through 12 write only below `candidate/`; they do not change canonical files. Do not install the recovery marker until every candidate and the completed manifest pass the step 2 structural and hash checks.
+
+### 10. Write the candidate Conversation Checkpoint
+
+Write one checkpoint for the invocation below `candidate/_conversations/sessions/`, even when the Agent Session affects several Project Conversations. Its contents and links must describe its final canonical path. Do not create or replace the canonical checkpoint yet.
 
 Name it `<local-ISO-timestamp>-<agent>.md`, using a filesystem-safe timestamp such as `2026-07-21T143000-0700-claude.md`. Add `-2`, `-3`, and so on when the name already exists.
 
@@ -199,9 +285,11 @@ conversations:
 
 Use one subsection per Project Conversation inside a section when ownership would otherwise be unclear.
 
-### 8. Refresh each Current Conversation
+Choose `reason` from the semantic boundary that caused the write. A cadence or lifecycle reminder is a trigger, not a reason; do not add `automatic`, `periodic`, or `bootstrap` to the vocabulary.
 
-Create or replace only the managed `.scratch/<conversation-id>/CONVERSATION.md`. Derive it from the previous Current Conversation, the new checkpoint, relevant legacy history, and current evidence. Keep still-open facts from earlier sessions; remove stale instructions and completed work from the resume path.
+### 11. Write each candidate Current Conversation
+
+Write a candidate for each managed `.scratch/<conversation-id>/CONVERSATION.md` at `candidate/<conversation-id>/CONVERSATION.md`. Derive it from the previous Current Conversation, the new checkpoint, relevant legacy history, and current evidence. Keep still-open facts from earlier sessions; remove stale instructions and completed work from the resume path. Do not replace canonical Current Conversations yet.
 
 ```markdown
 ---
@@ -261,9 +349,9 @@ Keep the first Resume line under 120 characters and do not use a pipe (`|`). For
 
 Resolve `latest_checkpoint` and History links from `CONVERSATION.md`, not from the project root.
 
-### 9. Regenerate the Conversation Index
+### 12. Write the candidate Conversation Index
 
-Write `.scratch/CONVERSATIONS.md` last. Build its table from managed Current Conversations and keep no unique facts in it.
+Write `candidate/CONVERSATIONS.md` after the other candidates. Replace rows for affected conversations from their candidate Current Conversations. Preserve untouched rows for other conversation IDs so an independent malformed area does not force this save to repair or discard it. Keep no unique facts in the index. Do not replace the canonical Index yet.
 
 ```markdown
 ---
@@ -283,25 +371,28 @@ updated_at: <ISO-8601 timestamp with offset>
 - [Previous conversation records](HANDOFFS.md)
 ```
 
-Copy each Current Conversation's first Resume line verbatim into the table. Sort by `waiting-user`, `ready`, `waiting-external`, `parked`, then `closed`, and by `updated_at` newest first within each group.
+Copy each affected Current Conversation's first Resume line verbatim into its row, and retain untouched rows verbatim. Sort all rows by `waiting-user`, `ready`, `waiting-external`, `parked`, then `closed`, and by the row's `updated_at` newest first within each group.
 
 Preserve relevant unmanaged or legacy links under `## Legacy records`. Keep a broken legacy link and mark it exactly as `[missing] as of <ISO-8601 timestamp with offset>`. Remove a legacy entry only with user approval. Omit the section when there are no legacy links.
 
-Before publishing, reread the index and affected Current Conversations. If another agent updated them after inspection, reconcile the new state instead of overwriting it.
+Before publishing, verify that every `existing` target still matches its staged prior hash and every `absent` target, including the reserved checkpoint path, is still absent. If either check fails, remove the markerless staging attempt, reconcile the new state instead of overwriting it, and rebuild the transaction.
 
-### 10. Validate before stopping
+### 13. Publish and validate
+
+Complete and verify the manifest, then atomically create `.scratch/_conversations/RECOVERY_REQUIRED.json` with `managed_by: conversation-continuity`, `transaction_version: 1`, the transaction token, and the exact manifest path. Refresh the lock. Create only required canonical parent directories. For each target, copy the immutable candidate bytes to a temporary canonical sibling and use `os.replace` or an equivalent atomic replacement, retaining the staged candidate for recovery. Publish in this order: checkpoint, affected Current Conversations, Conversation Index.
 
 Run the validator relative to this SKILL.md:
 
 ```sh
-python3 scripts/validate_conversations.py <project-root> --session <new-checkpoint>
+python3 scripts/validate_conversations.py <project-root> --session <new-checkpoint> \
+  --conversation <affected-id> [--conversation <affected-id> ...]
 ```
 
-Fix every error. Review every warning against source evidence, then read every new or changed conversation file end to end. Check that:
+If the validator reports an error, do not edit a canonical file under the recovery marker. Roll back first, correct and rebuild the candidates in a new staged transaction, and retry. Do not repair unrelated conversation areas as part of this save. Review every warning against source evidence, then read every new or changed conversation file end to end. Check that:
 
 - no earlier checkpoint was overwritten
 - every affected Current Conversation links to the new checkpoint
-- index links resolve and its table contains no detail absent from a Current Conversation
+- affected index links resolve and their rows contain no detail absent from the affected Current Conversations
 - legacy files remain unchanged and relevant links remain reachable
 - every Resume action maps to an item with the same actionable or waiting state
 - each `waiting-user` item contains the exact unanswered question
@@ -316,6 +407,12 @@ Fix every error. Review every warning against source evidence, then read every n
 
 If a fact cannot be checked, keep it and label it unverified instead of guessing.
 
+Any failure after staging begins enters cleanup before the lock is released. If the marker was not installed, no canonical file changed: remove this invocation's staging directory. If the marker was installed, keep the lock and run the same validated recovery procedure as step 2, regardless of whether the failure came from creating a directory, writing, renaming, launching the validator, validation, readback, or marker removal. A recovery mismatch must preserve the marker and staging rather than overwrite or delete an unexpected live file.
+
 ## Report completion
 
-After validation passes, treat the checkpoint as published and immutable. Tell the user which checkpoint and Current Conversations were written, which Project Conversations were affected, and which facts remain unverified. Do not paste the saved conversation into chat or resume project work in the same turn.
+After validation passes and the final readback succeeds, atomically remove the recovery marker; that removal is the publication commit point. Then remove the invocation's staging directory and release the publication lock. If staging cleanup alone fails after the marker is gone, report the leftover private path but do not roll back the published projection. Treat the checkpoint as published and immutable.
+
+On the explicit path, tell the user which checkpoint and Current Conversations were written, which Project Conversations were affected, and which facts remain unverified. Do not paste the saved conversation into chat or resume project work in the same turn.
+
+On the automatic path, do not add a standalone report for a successful save. If a checkpoint was published, mention it only when the current response already needs to discuss the breakpoint, a conflict, or an unverified fact. If the check was a no-op, say nothing about it. Always report a publication or restoration failure. Continue or finish only the work already authorized.

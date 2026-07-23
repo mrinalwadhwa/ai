@@ -6,6 +6,14 @@ Expertise provides guidance for particular areas of work. Before starting work, 
 
 When writing or editing prose for people or agents, load `~/.agents/expertise/ai/writing.md`.
 
+## Preserve project conversations
+
+The top-level interactive or orchestrating agent owns Project Conversation continuity. Delegated subagents and Fluent workers do not automatically save or resume Project Conversations.
+
+When lifecycle context requests a resume check, use `resume-conversation` before substantive work. Load only the saved conversation that matches the current request, and skip the check silently when nothing matches.
+
+When lifecycle context requests a save check, use `save-conversation` in its automatic path. After the first check, repeat it at material boundaries: a stable objective, a decision or correction, a meaningful implementation or verification result, a commit or external side effect, a blocking question, or an intentional pause. The check does not authorize unrelated work.
+
 ## Make questions easy to answer
 
 Do not ask for information you can discover yourself. When user input is needed, ask for one decision or one missing piece of information at a time. Explain only the context needed to answer, then present the question separately.

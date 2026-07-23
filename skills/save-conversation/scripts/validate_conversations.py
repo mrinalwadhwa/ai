@@ -431,7 +431,11 @@ def validate_conversation(path: Path, errors: list[str], warnings: list[str]) ->
     return frontmatter
 
 
-def parse_router_rows(path: Path, errors: list[str]) -> list[dict[str, str]]:
+def parse_router_rows(
+    path: Path,
+    errors: list[str],
+    selected: Optional[set[str]] = None,
+) -> list[dict[str, str]]:
     lines = path.read_text(encoding="utf-8").splitlines()
     header = "| Conversation | Status | Mode | Updated | Resume |"
     try:
@@ -445,12 +449,20 @@ def parse_router_rows(path: Path, errors: list[str]) -> list[dict[str, str]]:
         if not line.strip().startswith("|"):
             break
         parts = [part.strip() for part in line.strip().strip("|").split("|")]
+        label_match = re.match(r"^\[([^\]]+)\]", parts[0]) if parts else None
+        applies_to_scope = selected is None or (
+            label_match is not None and label_match.group(1) in selected
+        )
         if len(parts) != 5:
-            errors.append(issue("ERROR", path, f"router row must contain five columns: {line.strip()}"))
+            if applies_to_scope:
+                errors.append(issue("ERROR", path, f"router row must contain five columns: {line.strip()}"))
             continue
         conversation_match = CONVERSATION_LINK_RE.match(parts[0])
         if not conversation_match:
-            errors.append(issue("ERROR", path, f"invalid conversation link: {parts[0]}"))
+            if applies_to_scope:
+                errors.append(issue("ERROR", path, f"invalid conversation link: {parts[0]}"))
+            continue
+        if selected is not None and conversation_match.group(1) not in selected:
             continue
         rows.append(
             {
@@ -470,6 +482,7 @@ def validate_router(
     conversations: dict[str, dict[str, Any]],
     errors: list[str],
     warnings: list[str],
+    selected: Optional[set[str]] = None,
 ) -> Optional[int]:
     try:
         frontmatter, _ = parse_frontmatter(path)
@@ -489,11 +502,15 @@ def validate_router(
     if any(version_of(conversation) != SCHEMA_VERSION for conversation in conversations.values()):
         errors.append(issue("ERROR", path, "router and Current Conversations must use the same schema version"))
 
-    rows = parse_router_rows(path, errors)
+    rows = parse_router_rows(path, errors, selected)
     rows_by_conversation = {row["conversation"]: row for row in rows}
-    if len(rows_by_conversation) != len(rows):
+    if selected is None and len(rows_by_conversation) != len(rows):
         errors.append(issue("ERROR", path, "router contains a duplicate conversation row"))
-    if set(rows_by_conversation) != set(conversations):
+    elif selected is not None:
+        for conversation_name in selected:
+            if sum(row["conversation"] == conversation_name for row in rows) > 1:
+                errors.append(issue("ERROR", path, f"router contains duplicate rows for: {conversation_name}"))
+    if selected is None and set(rows_by_conversation) != set(conversations):
         errors.append(issue("ERROR", path, "router rows do not match managed conversation projections"))
 
     for conversation_name, conversation in conversations.items():
@@ -509,17 +526,22 @@ def validate_router(
         if row["resume"] != conversation.get("_first_resume_line"):
             errors.append(issue("ERROR", path, f"{conversation_name}: Resume must copy the first Resume line verbatim"))
 
-    order = {status: index for index, status in enumerate(STATUSES)}
-    expected = sorted(
-        rows,
-        key=lambda row: (
-            order.get(row["status"], len(order)),
-            -dt.datetime.fromisoformat(row["updated_at"]).timestamp() if valid_timestamp(row["updated_at"]) else 0,
-        ),
-    )
-    if rows != expected:
-        errors.append(issue("ERROR", path, "router rows are not in status and newest-first order"))
-    validate_links(path, errors, warnings)
+    if selected is not None:
+        for conversation_name in selected:
+            if conversation_name not in rows_by_conversation:
+                errors.append(issue("ERROR", path, f"router has no row for selected conversation: {conversation_name}"))
+    else:
+        order = {status: index for index, status in enumerate(STATUSES)}
+        expected = sorted(
+            rows,
+            key=lambda row: (
+                order.get(row["status"], len(order)),
+                -dt.datetime.fromisoformat(row["updated_at"]).timestamp() if valid_timestamp(row["updated_at"]) else 0,
+            ),
+        )
+        if rows != expected:
+            errors.append(issue("ERROR", path, "router rows are not in status and newest-first order"))
+        validate_links(path, errors, warnings)
     scan_risky_claims(path, warnings)
     return version
 
@@ -530,6 +552,8 @@ def validate_checkpoint(
     conversations: dict[str, dict[str, Any]],
     errors: list[str],
     warnings: list[str],
+    selected: Optional[set[str]] = None,
+    exact_scope: bool = True,
 ) -> None:
     checkpoint_path = session_arg if session_arg.is_absolute() else project / session_arg
     checkpoint_path = checkpoint_path.resolve()
@@ -574,11 +598,19 @@ def validate_checkpoint(
     if not isinstance(session_conversations, list) or not session_conversations:
         errors.append(issue("ERROR", checkpoint_path, "conversations must contain at least one conversation"))
     else:
+        if selected is not None:
+            recorded = set(session_conversations)
+            if exact_scope and recorded != selected:
+                errors.append(issue("ERROR", checkpoint_path, "conversations must match the selected conversation scope"))
+            elif not exact_scope and not selected.issubset(recorded):
+                errors.append(issue("ERROR", checkpoint_path, "selected conversation is absent from the checkpoint"))
         if len(set(session_conversations)) != len(session_conversations):
             errors.append(issue("ERROR", checkpoint_path, "conversations contains a duplicate conversation"))
         for conversation_name in session_conversations:
             if not CONVERSATION_NAME_RE.match(conversation_name):
                 errors.append(issue("ERROR", checkpoint_path, f"invalid conversation name: {conversation_name!r}"))
+        conversations_to_check = selected if selected is not None else set(session_conversations)
+        for conversation_name in conversations_to_check:
             conversation = conversations.get(conversation_name)
             if not conversation:
                 errors.append(issue("ERROR", checkpoint_path, f"missing managed conversation projection: {conversation_name}"))
@@ -590,7 +622,11 @@ def validate_checkpoint(
     scan_risky_claims(checkpoint_path, warnings)
 
 
-def validate_project(project: Path, session: Optional[Path] = None) -> tuple[list[str], list[str]]:
+def validate_project(
+    project: Path,
+    session: Optional[Path] = None,
+    selected: Optional[set[str]] = None,
+) -> tuple[list[str], list[str]]:
     project = project.expanduser().resolve()
     root = project / ".scratch"
     errors: list[str] = []
@@ -599,21 +635,53 @@ def validate_project(project: Path, session: Optional[Path] = None) -> tuple[lis
         return [issue("ERROR", root, "conversation root does not exist")], warnings
 
     conversations: dict[str, dict[str, Any]] = {}
-    for conversation_path in sorted(root.glob("*/CONVERSATION.md")):
+    if selected is None:
+        conversation_paths = sorted(root.glob("*/CONVERSATION.md"))
+    else:
+        for conversation_name in selected:
+            if not CONVERSATION_NAME_RE.match(conversation_name):
+                errors.append(issue("ERROR", root, f"invalid selected conversation name: {conversation_name!r}"))
+        conversation_paths = [
+            root / name / "CONVERSATION.md"
+            for name in sorted(selected)
+            if CONVERSATION_NAME_RE.match(name)
+        ]
+    for conversation_path in conversation_paths:
+        if not conversation_path.is_file():
+            errors.append(issue("ERROR", conversation_path, "selected Current Conversation does not exist"))
+            continue
         conversation = validate_conversation(conversation_path, errors, warnings)
         if conversation is not None:
             conversations[str(conversation.get("conversation", conversation_path.parent.name))] = conversation
+        elif selected is not None:
+            errors.append(issue("ERROR", conversation_path, "selected Current Conversation is not managed"))
 
     router = root / "CONVERSATIONS.md"
     router_version: Optional[int] = None
     if not router.is_file():
         errors.append(issue("ERROR", router, "managed router does not exist"))
     else:
-        router_version = validate_router(router, conversations, errors, warnings)
+        router_version = validate_router(router, conversations, errors, warnings, selected)
     if session is not None:
         if router_version != SCHEMA_VERSION:
             errors.append(issue("ERROR", router, "publishing a checkpoint requires a valid Conversation Index"))
-        validate_checkpoint(project, session, conversations, errors, warnings)
+        validate_checkpoint(project, session, conversations, errors, warnings, selected)
+    else:
+        checkpoints: dict[Path, set[str]] = {}
+        for conversation_name, conversation in conversations.items():
+            checkpoint_path = conversation.get("_latest_checkpoint_path")
+            if isinstance(checkpoint_path, Path):
+                checkpoints.setdefault(checkpoint_path, set()).add(conversation_name)
+        for checkpoint_path, checkpoint_conversations in checkpoints.items():
+            validate_checkpoint(
+                project,
+                checkpoint_path,
+                conversations,
+                errors,
+                warnings,
+                checkpoint_conversations,
+                exact_scope=False,
+            )
     return errors, warnings
 
 
@@ -621,12 +689,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("project", type=Path, help="Project root that contains .scratch")
     parser.add_argument("--session", type=Path, help="New checkpoint path, absolute or relative to the project root")
+    parser.add_argument(
+        "--conversation",
+        action="append",
+        dest="conversations",
+        help="Validate only this Current Conversation; repeat for a multi-conversation checkpoint",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    errors, warnings = validate_project(args.project, args.session)
+    selected = set(args.conversations) if args.conversations else None
+    errors, warnings = validate_project(args.project, args.session, selected)
     for message in warnings:
         print(message, file=sys.stderr)
     for message in errors:

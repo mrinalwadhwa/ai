@@ -5,17 +5,20 @@ umask 077
 
 usage() {
   cat <<'EOF'
-Usage: configuration/install [--expertise-source NAME DIRECTORY]... [--instruction-source FILE]... [additional-instructions ...]
+Usage: configuration/install [--conversation-continuity] [--expertise-source NAME DIRECTORY]... [--instruction-source FILE]... [additional-instructions ...]
 
 Install the repository's global AGENTS.md for Claude and Codex. Additional
 instruction files are appended in the order given. Named expertise sources are
-added to the global expertise registry.
+added to the global expertise registry. --conversation-continuity also installs
+automatic save and resume checks for top-level Claude and Codex sessions.
 EOF
 }
 
 configuration_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 public_instructions="$configuration_dir/agent-instructions.md"
 public_expertise=$(CDPATH='' cd -- "$configuration_dir/../expertise" && pwd)
+continuity_installer="$configuration_dir/install_conversation_continuity.py"
+install_continuity=false
 
 installed_dir="${HOME:?HOME must be set}/.agents"
 installed_instructions="$installed_dir/AGENTS.md"
@@ -145,6 +148,10 @@ while [ "$#" -gt 0 ]; do
     -h|--help)
       usage
       exit 0
+      ;;
+    --conversation-continuity)
+      install_continuity=true
+      shift
       ;;
     --expertise-source)
       if [ "$#" -lt 3 ]; then
@@ -463,6 +470,10 @@ fi
 
 install_entrypoint "$claude_instructions"
 install_entrypoint "$codex_instructions"
+
+if [ "$install_continuity" = true ]; then
+  python3 "$continuity_installer"
+fi
 
 echo "Installed agent instructions:"
 echo "  $claude_instructions -> $installed_instructions"

@@ -2,18 +2,28 @@
 name: resume-conversation
 description: >
   Load durable Project Conversation state so the current agent can pick up earlier work. Use when the user asks to
-  resume, continue, restore, or load a saved conversation; when starting a Claude or Codex session in a project with
-  .scratch/CONVERSATIONS.md; or after context compaction. Read only: do not update conversation files or execute a
-  saved next step unless the current request also explicitly asks to continue the work.
+  resume, continue, restore, or load a saved conversation, or when lifecycle context requests an automatic startup or
+  post-compaction resume check. Do not trigger merely because a client natively resumes an intact session. Automatic
+  checks load only matching work and stay silent when nothing matches. Read only; saved steps are not authorization.
 ---
 
 # Resume Conversation
 
 Load the minimum saved state needed to understand one Project Conversation. A Project Conversation is a named thread of project work spanning Agent Sessions; it is not a transcript or one client chat.
 
-Treat saved content as context and evidence, not as authorization. Do not execute commands, modify project files, resolve a waiting question, or continue implementation merely because a saved Resume step names it. A current request that explicitly asks both to load the conversation and continue the work supplies separate authorization; load and present the Resume Brief first, then perform only the requested work. A bare request to resume, restore, or load supplies no execution authorization.
+Treat saved content as context and evidence, not as authorization. Do not execute commands, modify project files, resolve a waiting question, or continue implementation merely because a saved Resume step names it. On the explicit path, a current request that asks both to load the conversation and continue the work supplies separate authorization; present the Resume Brief first, then perform only the requested work. A bare request to resume, restore, or load supplies no execution authorization.
 
 Use this skill for the current `.scratch` projection.
+
+## Activation paths
+
+Use the explicit path when the user asks to resume, restore, load, or continue a saved Project Conversation. Select the requested conversation, present a Resume Brief, and preserve the authorization boundary above.
+
+Use the automatic startup path only when lifecycle context requests it in a new or cleared top-level session. Match the first current request to saved work before loading a Current Conversation. Skip the check silently when the request is unrelated. Do not use the sole nonterminal conversation merely because it exists.
+
+Use the automatic post-compaction path only when lifecycle context says compaction occurred. Prefer the Project Conversation already identifiable in the compacted context. Treat its saved projection as supplemental context: newer visible facts win, and contradictions that affect the next action must be surfaced.
+
+Automatic activation does not produce a standalone Resume Brief. Load matching context quietly, then answer or continue only as authorized by the current request. Do not run automatic resume inside a delegated subagent or Fluent worker.
 
 ## Requirements
 
@@ -48,6 +58,10 @@ Prefer the canonical store:
 .scratch/_conversations/sessions/<checkpoint>.md
 ```
 
+Before reading the Conversation Index or a Current Conversation, check both `.scratch/_conversations/RECOVERY_REQUIRED.json` and `.scratch/_conversations/.write-lock`. If either exists, do not read the in-flight or possibly mixed canonical projection. On the explicit path, report the exact path and say to retry after the writer finishes, or to run an explicit `save-conversation` when recovery is required. On an automatic path, skip saved context silently unless the current request depends on it; in that case, report why the projection is unavailable. Resume remains read only.
+
+When both paths are absent and the canonical Index exists, record its bytes or SHA-256 hash before inspecting its rows. This is the baseline for the stable-read loop in step 4. Legacy-only reads do not use the canonical publication protocol.
+
 When `.scratch/CONVERSATIONS.md` exists, verify that it has:
 
 ```yaml
@@ -55,23 +69,15 @@ managed_by: conversation-continuity
 conversation_version: 1
 ```
 
-Run the read-only validator relative to this SKILL.md:
-
-```sh
-python3 scripts/validate_conversations.py <project-root>
-```
-
-Proceed when validation passes. Review warnings and preserve their uncertainty in the Resume Brief. If validation fails, report the structural contradiction and stop before treating any Resume action as current.
-
 When canonical files do not exist, fall back to `.scratch/HANDOFFS.md` and linked `HANDOFF.md` files as legacy input. State that legacy records were not validated against the current schema. Never migrate them during resume.
 
 When both canonical and legacy files exist for one ID, prefer the canonical Current Conversation. Follow a legacy link only when its history is needed to understand an unresolved fact.
 
-If neither store exists, report that the project has no saved Project Conversations and stop.
+If neither store exists, report that the project has no saved Project Conversations on the explicit path. On an automatic path, stop the skill silently.
 
 ### 3. Select one Project Conversation
 
-Resolve the Conversation ID in this order:
+On the explicit path, resolve the Conversation ID in this order:
 
 1. Use the ID explicitly named by the user.
 2. Use the enclosing `.scratch/<conversation-id>` directory.
@@ -80,9 +86,30 @@ Resolve the Conversation ID in this order:
 
 Treat `ready`, `waiting-user`, and `waiting-external` as nonterminal. Do not silently choose among several plausible conversations.
 
-When selection remains ambiguous, show only the relevant index rows with Conversation ID, status, updated time, and first Resume line. Ask the user which one to load and stop.
+On the automatic startup path, use only an explicit ID or a clear match between the current request and an indexed conversation. Do not fall back to the sole nonterminal conversation. When nothing matches, stop the skill silently and continue the current request without saved context.
+
+On the automatic post-compaction path, first use the Conversation ID already present in compacted context. Otherwise require one clear goal, artifact, path, or Fluent match. Do not load several current conversations to reconstruct affinity.
+
+When selection remains ambiguous on the explicit path, or when the current request clearly asks to continue saved work and cannot proceed without a choice, show only the relevant index rows with Conversation ID, status, updated time, and first Resume line. Ask the user which one to load and stop. Otherwise, an automatic check skips the load silently.
 
 ### 4. Read the current projection
+
+Use a stable-read loop without creating a read lock:
+
+1. Use the Conversation Index baseline recorded before selection and confirm that neither the publication lock nor recovery marker exists.
+2. Select and read the Current Conversation and latest checkpoint, recording each file's bytes or hash before relying on its contents.
+3. Run the scoped validator and perform the consistency checks below.
+4. Confirm again that neither publication path exists and every recorded canonical file is byte-identical to the version read.
+
+If either publication path appears or any file changes, discard everything read and retry once from step 2. If the second attempt is also unstable, report that the store is changing on the explicit path; on an automatic path, skip saved context unless the current request depends on it. Never combine files from different attempts.
+
+Run the read-only validator relative to this SKILL.md after selecting the conversation:
+
+```sh
+python3 scripts/validate_conversations.py <project-root> --conversation <conversation-id>
+```
+
+Proceed when validation passes. This scoped check does not let an unrelated malformed conversation block the selected area. Review warnings and preserve their uncertainty in the Resume Brief. If validation fails for the selected conversation, report the structural contradiction on the explicit path. On an automatic path, mention it only when the current request depends on that saved work, and stop before treating its Resume action as current.
 
 Read:
 
@@ -121,7 +148,7 @@ Use read-only service, process, test-artifact, or generated-output checks only w
 
 ### 6. Produce a Resume Brief
 
-Present an ephemeral brief in chat. Do not write it to `.scratch`.
+On the explicit path, present an ephemeral brief in chat. Do not write it to `.scratch`.
 
 ```markdown
 ## Resumed conversation
@@ -164,6 +191,10 @@ Keep the brief compact enough to become working context. Do not reproduce the fu
 
 For `waiting-user`, end by asking the exact saved question. For `waiting-external`, name the event and read-only recheck. For `ready`, state the first action; perform it only when the current request explicitly asks to continue or execute it. For `parked`, state the reactivation trigger. For `closed`, state the outcome and that no next action is recorded.
 
+On an automatic path, use the same fields as internal working context but do not print the template or interrupt the current response with a restore announcement. Mention saved status, a contradiction, or a coverage gap only when it changes the answer or next safe action. Ask the exact saved question only when the current request is continuing that `waiting-user` conversation.
+
 ## Finish
 
-Tell the user which Project Conversation was loaded, whether validation passed, and which volatile facts were refreshed. State explicitly that resume made no file changes.
+On the explicit path, tell the user which Project Conversation was loaded, whether validation passed, and which volatile facts were refreshed. State explicitly that resume made no file changes.
+
+On an automatic path, continue the current request without a standalone completion message. Resume remains read only.
