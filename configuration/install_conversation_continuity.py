@@ -138,8 +138,6 @@ def remove_owned_handlers(
 def add_hooks(
     settings: dict[str, Any],
     command: str,
-    *,
-    codex: bool,
 ) -> None:
     hooks = settings.setdefault("hooks", {})
     handler: dict[str, Any] = {
@@ -147,8 +145,6 @@ def add_hooks(
         "command": command,
         "timeout": 5,
     }
-    if codex:
-        handler["statusMessage"] = "Checking conversation continuity"
     hooks.setdefault("SessionStart", []).append(
         {
             "matcher": "startup|clear|compact",
@@ -186,8 +182,8 @@ def install(
 
     new_claude_settings = remove_owned_handlers(claude_settings, owned_commands)
     new_codex_hooks = remove_owned_handlers(codex_hooks, owned_commands)
-    add_hooks(new_claude_settings, claude_hook_command, codex=False)
-    add_hooks(new_codex_hooks, codex_hook_command, codex=True)
+    add_hooks(new_claude_settings, claude_hook_command)
+    add_hooks(new_codex_hooks, codex_hook_command)
 
     messages = []
     existing_statusline = new_claude_settings.get("statusLine")

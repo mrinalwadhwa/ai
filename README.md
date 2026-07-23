@@ -16,7 +16,9 @@ npx skills add mrinalwadhwa/ai --skill save-conversation --skill resume-conversa
 
 Install both conversation skills first; the lifecycle checks invoke them by name.
 
-The optional flag installs lifecycle checks for top-level Claude and Codex sessions. A new or cleared session conditionally loads matching Project Conversation state, and save checks run after the first turn, every three later turns, after 15 minutes, and after compaction. Claude also requests checks at 55% and 75% context use when it does not already have a custom status line.
+The optional flag installs lifecycle checks for top-level Claude and Codex sessions. A new or cleared session conditionally loads matching Project Conversation state. A save check runs after the first turn, then after eight later turns or 45 minutes, and after compaction. Claude also requests checks at 70% and 85% context use when it does not already have a custom status line. Turn and time intervals start when the preceding check finishes, not when it starts.
+
+Automatic checks are silent when they succeed or make no changes. Cadence triggers an evaluation, not necessarily a checkpoint. Recoverable live state is never saved. Unfinished discussion is saved only when the session is intentionally pausing or visible context is at risk.
 
 Checks follow the project associated with the session's working directory. The controller resolves a `main/` durable checkout from its workspace container and from linked worktrees. For work deliberately conducted across another project, use an explicit save or resume request to name that project.
 
@@ -28,11 +30,13 @@ The installer preserves unrelated Claude and Codex hooks. Review and trust the i
 
 ```json
 {
-  "save_every_turns": 3,
-  "save_every_minutes": 15,
-  "context_thresholds": [55, 75]
+  "save_every_turns": 8,
+  "save_every_minutes": 45,
+  "context_thresholds": [70, 85]
 }
 ```
+
+The controller records one metadata-only JSON event for each completed check that it requests under `~/.agents/state/conversation-continuity/events/`. Events include the trigger causes, duration, and whether the Conversation Index changed. They do not include prompts, responses, or saved conversation content.
 
 ## Skills
 

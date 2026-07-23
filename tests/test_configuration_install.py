@@ -88,6 +88,11 @@ class ConversationContinuityInstallerTests(unittest.TestCase):
         self.assertEqual(codex["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "/existing/pre-tool")
         self.assertIn("SessionStart", claude["hooks"])
         self.assertIn("Stop", codex["hooks"])
+        for groups in codex["hooks"].values():
+            for group in groups:
+                for handler in group["hooks"]:
+                    if handler["command"].endswith("hook --client codex"):
+                        self.assertNotIn("statusMessage", handler)
         self.assertEqual(claude["statusLine"]["command"], f"{executable} statusline")
         self.assertTrue(executable.stat().st_mode & 0o100)
 

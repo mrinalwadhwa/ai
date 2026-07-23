@@ -12,7 +12,7 @@ The top-level interactive or orchestrating agent owns Project Conversation conti
 
 When lifecycle context requests a resume check, use `resume-conversation` before substantive work. Load only the saved conversation that matches the current request, and skip the check silently when nothing matches.
 
-When lifecycle context requests a save check, use `save-conversation` in its automatic path. After the first check, repeat it at material boundaries: a stable objective, a decision or correction, a meaningful implementation or verification result, a commit or external side effect, a blocking question, or an intentional pause. The check does not authorize unrelated work.
+When lifecycle context requests a save check, use `save-conversation` in its automatic path. After the first check, reassess only at a durable milestone containing nonrecoverable session context, an intentional session pause or switch, or visible context risk. Do not treat recoverable implementation, verification, Git, or external-system state, an ordinary question, or a normal end of turn as a checkpoint boundary. Successful and no-op automatic checks are silent; report failures and conflicts that require user action. The check does not authorize unrelated work.
 
 ## Make questions easy to answer
 

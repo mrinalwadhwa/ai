@@ -9,6 +9,7 @@ import contextlib
 import hashlib
 import json
 import os
+import secrets
 import sys
 import tempfile
 import time
@@ -17,13 +18,16 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 
 
-STATE_VERSION = 1
+STATE_VERSION = 2
+EVENT_VERSION = 1
 LOCK_STALE_SECONDS = 30
 LOCK_WAIT_SECONDS = 1
+DUPLICATE_STOP_SECONDS = 5
+PENDING_STALE_SECONDS = 60 * 60
 DEFAULT_CONFIG = {
-    "save_every_turns": 3,
-    "save_every_minutes": 15,
-    "context_thresholds": [55, 75],
+    "save_every_turns": 8,
+    "save_every_minutes": 45,
+    "context_thresholds": [70, 85],
 }
 AUTOMATION_ENV = "AGENT_CONVERSATION_CONTINUITY"
 CONFIG_ENV = "AGENT_CONVERSATION_CONTINUITY_CONFIG"
@@ -186,6 +190,10 @@ def state_path(root: Path, client: str, session_id: str, project_root: Path) -> 
     return root / f"{hashlib.sha256(identity).hexdigest()}.json"
 
 
+def event_path(path: Path, evaluation_id: str) -> Path:
+    return path.parent / "events" / f"{path.stem}-{evaluation_id}.json"
+
+
 @contextlib.contextmanager
 def state_lock(path: Path) -> Iterator[None]:
     lock = path.with_suffix(".lock")
@@ -214,31 +222,80 @@ def state_lock(path: Path) -> Iterator[None]:
             pass
 
 
-def new_state(now: float) -> dict[str, Any]:
+def new_state(now: float, cause: str = "initial") -> dict[str, Any]:
     return {
         "version": STATE_VERSION,
-        "turns_since_evaluation": 0,
-        "last_evaluation_at": now,
-        "force_evaluation": True,
+        "turns_since_completion": 0,
+        "last_completed_at": now,
+        "force_causes": [cause],
         "context_thresholds_seen": [],
         "last_context_percentage": None,
+        "pending_evaluation": None,
+        "last_completion": None,
     }
 
 
-def load_state(path: Path, now: float) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-        return new_state(now)
-    valid = (
+def valid_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def valid_pending(value: Any) -> bool:
+    if value is None:
+        return True
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("evaluation_id"), str)
+        and len(value["evaluation_id"]) == 24
+        and all(character in "0123456789abcdef" for character in value["evaluation_id"])
+        and valid_number(value.get("triggered_at"))
+        and isinstance(value.get("causes"), list)
+        and all(isinstance(item, str) and item for item in value["causes"])
+        and isinstance(value.get("attempt"), int)
+        and not isinstance(value.get("attempt"), bool)
+        and value["attempt"] >= 1
+        and isinstance(value.get("baseline_index"), str)
+        and (
+            value.get("finalization") is None
+            or (
+                isinstance(value.get("finalization"), dict)
+                and valid_number(value["finalization"].get("completed_at"))
+                and value["finalization"].get("outcome")
+                in {"index-changed", "index-unchanged", "expired"}
+                and value["finalization"].get("completion_source")
+                in {"stop-hook", "stale-recovery", "session-reset"}
+                and isinstance(value["finalization"].get("index_changed"), bool)
+                and (
+                    value["finalization"].get("retry") is None
+                    or (
+                        isinstance(value["finalization"].get("retry"), dict)
+                        and isinstance(value["finalization"]["retry"].get("causes"), list)
+                        and all(
+                            isinstance(item, str) and item
+                            for item in value["finalization"]["retry"]["causes"]
+                        )
+                        and isinstance(value["finalization"]["retry"].get("attempt"), int)
+                        and not isinstance(value["finalization"]["retry"].get("attempt"), bool)
+                        and value["finalization"]["retry"]["attempt"] >= 1
+                        and valid_number(value["finalization"]["retry"].get("triggered_at"))
+                        and isinstance(value["finalization"]["retry"].get("baseline_index"), str)
+                    )
+                )
+            )
+        )
+    )
+
+
+def valid_v2_state(value: Any) -> bool:
+    return (
         isinstance(value, dict)
         and value.get("version") == STATE_VERSION
-        and isinstance(value.get("turns_since_evaluation"), int)
-        and not isinstance(value.get("turns_since_evaluation"), bool)
-        and value["turns_since_evaluation"] >= 0
-        and isinstance(value.get("last_evaluation_at"), (int, float))
-        and not isinstance(value.get("last_evaluation_at"), bool)
-        and isinstance(value.get("force_evaluation"), bool)
+        and isinstance(value.get("turns_since_completion"), int)
+        and not isinstance(value.get("turns_since_completion"), bool)
+        and value["turns_since_completion"] >= 0
+        and isinstance(value.get("last_completed_at"), (int, float))
+        and not isinstance(value.get("last_completed_at"), bool)
+        and isinstance(value.get("force_causes"), list)
+        and all(isinstance(item, str) and item for item in value["force_causes"])
         and isinstance(value.get("context_thresholds_seen"), list)
         and all(
             isinstance(item, int) and not isinstance(item, bool) and 1 <= item <= 99
@@ -247,14 +304,62 @@ def load_state(path: Path, now: float) -> dict[str, Any]:
         and (
             value.get("last_context_percentage") is None
             or (
-                isinstance(value.get("last_context_percentage"), (int, float))
-                and not isinstance(value.get("last_context_percentage"), bool)
+                valid_number(value.get("last_context_percentage"))
+            )
+        )
+        and valid_pending(value.get("pending_evaluation"))
+        and (
+            value.get("last_completion") is None
+            or (
+                isinstance(value.get("last_completion"), dict)
+                and isinstance(value["last_completion"].get("evaluation_id"), str)
+                and valid_number(value["last_completion"].get("completed_at"))
+                and value["last_completion"].get("outcome")
+                in {"index-changed", "index-unchanged", "expired"}
             )
         )
     )
-    if not valid:
+
+
+def valid_v1_state(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("version") == 1
+        and isinstance(value.get("turns_since_evaluation"), int)
+        and not isinstance(value.get("turns_since_evaluation"), bool)
+        and value["turns_since_evaluation"] >= 0
+        and valid_number(value.get("last_evaluation_at"))
+        and isinstance(value.get("force_evaluation"), bool)
+        and isinstance(value.get("context_thresholds_seen"), list)
+        and all(
+            isinstance(item, int) and not isinstance(item, bool) and 1 <= item <= 99
+            for item in value["context_thresholds_seen"]
+        )
+        and (
+            value.get("last_context_percentage") is None
+            or valid_number(value.get("last_context_percentage"))
+        )
+    )
+
+
+def migrate_v1_state(value: dict[str, Any], now: float) -> dict[str, Any]:
+    state = new_state(now, "legacy-pending")
+    state["force_causes"] = ["legacy-pending"] if value["force_evaluation"] else []
+    state["context_thresholds_seen"] = list(value["context_thresholds_seen"])
+    state["last_context_percentage"] = value["last_context_percentage"]
+    return state
+
+
+def load_state(path: Path, now: float) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
         return new_state(now)
-    return value
+    if valid_v2_state(value):
+        return value
+    if valid_v1_state(value):
+        return migrate_v1_state(value, now)
+    return new_state(now)
 
 
 def write_state(path: Path, state: dict[str, Any]) -> None:
@@ -278,6 +383,207 @@ def write_state(path: Path, state: dict[str, Any]) -> None:
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def index_revision(router: Path) -> str:
+    try:
+        if router.is_symlink() or not router.is_file():
+            return "absent" if not router.exists() else "non-regular"
+        return f"sha256:{hashlib.sha256(router.read_bytes()).hexdigest()}"
+    except OSError:
+        return "unreadable"
+
+
+def write_event(path: Path, event: dict[str, Any]) -> None:
+    destination = event_path(path, event["evaluation_id"])
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    content = (json.dumps(event, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    handle = tempfile.NamedTemporaryFile(
+        mode="wb",
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        delete=False,
+    )
+    temporary = Path(handle.name)
+    try:
+        with handle:
+            handle.write(content)
+        temporary.chmod(0o600)
+        try:
+            os.link(temporary, destination)
+        except FileExistsError:
+            if destination.read_bytes() != content:
+                raise ValueError(f"continuity event conflicts with existing event: {destination}")
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def add_cause(state: dict[str, Any], cause: str) -> None:
+    causes = state.setdefault("force_causes", [])
+    if cause not in causes:
+        causes.append(cause)
+
+
+def merge_causes(first: list[str], second: list[str]) -> list[str]:
+    merged = []
+    for cause in (*first, *second):
+        if cause not in merged:
+            merged.append(cause)
+    return merged
+
+
+def reset_after_evaluation(state: dict[str, Any], now: float) -> None:
+    state["turns_since_completion"] = 0
+    state["last_completed_at"] = now
+    state["pending_evaluation"] = None
+
+
+def begin_evaluation(
+    state: dict[str, Any],
+    now: float,
+    causes: list[str],
+    router: Path,
+    *,
+    attempt: int = 1,
+) -> dict[str, Any]:
+    pending = {
+        "evaluation_id": secrets.token_hex(12),
+        "triggered_at": now,
+        "causes": causes,
+        "attempt": attempt,
+        "baseline_index": index_revision(router),
+        "finalization": None,
+    }
+    state["pending_evaluation"] = pending
+    state["force_causes"] = []
+    return pending
+
+
+def prepare_finalization(
+    state: dict[str, Any],
+    router: Path,
+    now: float,
+    source: str,
+    *,
+    forced_outcome: Optional[str] = None,
+    retry: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    pending = state["pending_evaluation"]
+    current_revision = index_revision(router)
+    changed = current_revision != pending["baseline_index"]
+    outcome = forced_outcome or (
+        "index-changed" if changed else "index-unchanged"
+    )
+    if retry is not None:
+        retry = {
+            **retry,
+            "triggered_at": now,
+            "baseline_index": current_revision,
+        }
+    finalization = {
+        "completed_at": now,
+        "outcome": outcome,
+        "completion_source": source,
+        "index_changed": changed,
+        "retry": retry,
+    }
+    pending["finalization"] = finalization
+    return finalization
+
+
+def evaluation_event(
+    state: dict[str, Any],
+    client: str,
+    session_id: str,
+    project_root: Path,
+) -> dict[str, Any]:
+    pending = state["pending_evaluation"]
+    finalization = pending["finalization"]
+    triggered_at = float(pending["triggered_at"])
+    completed_at = float(finalization["completed_at"])
+    return {
+        "version": EVENT_VERSION,
+        "evaluation_id": pending["evaluation_id"],
+        "client": client,
+        "session_id": session_id,
+        "project_root": str(project_root),
+        "triggered_at": triggered_at,
+        "completed_at": completed_at,
+        "duration_seconds": max(0, completed_at - triggered_at),
+        "causes": pending["causes"],
+        "outcome": finalization["outcome"],
+        "index_changed": finalization["index_changed"],
+        "completion_source": finalization["completion_source"],
+        "attempt": pending["attempt"],
+    }
+
+
+def finish_finalization(
+    path: Path,
+    state: dict[str, Any],
+    client: str,
+    session_id: str,
+    project_root: Path,
+) -> Optional[dict[str, Any]]:
+    event = evaluation_event(state, client, session_id, project_root)
+    retry = state["pending_evaluation"]["finalization"].get("retry")
+    write_event(path, event)
+    state["last_completion"] = {
+        "evaluation_id": event["evaluation_id"],
+        "completed_at": event["completed_at"],
+        "outcome": event["outcome"],
+    }
+    reset_after_evaluation(state, event["completed_at"])
+    pending = None
+    if isinstance(retry, dict):
+        retry_causes = merge_causes(
+            retry["causes"],
+            list(state.get("force_causes", [])),
+        )
+        pending = {
+            "evaluation_id": secrets.token_hex(12),
+            "triggered_at": retry["triggered_at"],
+            "causes": retry_causes,
+            "attempt": retry["attempt"],
+            "baseline_index": retry["baseline_index"],
+            "finalization": None,
+        }
+        state["pending_evaluation"] = pending
+        state["force_causes"] = []
+    write_state(path, state)
+    return pending
+
+
+def finalize_pending(
+    path: Path,
+    state: dict[str, Any],
+    client: str,
+    session_id: str,
+    scope: ProjectScope,
+    now: float,
+    source: str,
+    *,
+    forced_outcome: Optional[str] = None,
+    retry: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    pending = state.get("pending_evaluation")
+    if not isinstance(pending, dict):
+        return None
+    if pending.get("finalization") is None:
+        router = scope.root / ".scratch" / "CONVERSATIONS.md"
+        prepare_finalization(
+            state,
+            router,
+            now,
+            source,
+            forced_outcome=forced_outcome,
+            retry=retry,
+        )
+        write_state(path, state)
+    return finish_finalization(path, state, client, session_id, scope.root)
 
 
 def additional_context(event: str, message: str) -> dict[str, Any]:
@@ -305,12 +611,16 @@ def resume_message(source: str) -> str:
     )
 
 
-def save_message() -> str:
+def save_message(pending: dict[str, Any]) -> str:
+    causes = ", ".join(pending["causes"])
     return (
-        "[conversation-continuity:save-check] Before ending this turn, use the save-conversation skill in its "
-        "automatic path to decide whether durable Project Conversation state materially changed. Write nothing when "
-        "a later agent's next action, constraints, decisions, evidence, and understanding of side effects would stay "
-        "the same. Otherwise save at a safe boundary. Continue only work already authorized by the current request."
+        f"[conversation-continuity:save-check; causes={causes}] Silently use the save-conversation automatic path. "
+        "Save only when unsaved context cannot be reconstructed from Git, project documentation, Fluent, artifacts, "
+        "or live systems and the work reached a durable milestone, the session is intentionally pausing, or visible "
+        "context is at risk. Never save recoverable live state. Save unfinished discussion only when the session is "
+        "intentionally pausing or visible context is at risk. Do not announce or narrate the check, and do not "
+        "mention a successful save or no-op. Only report a failure or conflict required by the skill's guardrails. "
+        "Continue only work already authorized by the current request."
     )
 
 
@@ -331,25 +641,44 @@ def process_session_start(
     path = state_path(state_root(home), client, session_id, scope.root)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with state_lock(path):
-        if source in {"startup", "clear"}:
-            state = new_state(now)
-        else:
+        state = load_state(path, now)
+        pending = state.get("pending_evaluation")
+        if isinstance(pending, dict) and pending.get("finalization") is not None:
+            recovered_retry = finish_finalization(path, state, client, session_id, scope.root)
             state = load_state(path, now)
-            state["turns_since_evaluation"] = 0
-            state["force_evaluation"] = True
+            if recovered_retry is not None:
+                state["pending_evaluation"] = None
+                state["force_causes"] = merge_causes(
+                    list(state.get("force_causes", [])),
+                    recovered_retry["causes"],
+                )
+        if source in {"startup", "clear"}:
+            pending = state.get("pending_evaluation")
+            if isinstance(pending, dict):
+                router = scope.root / ".scratch" / "CONVERSATIONS.md"
+                changed = index_revision(router) != pending["baseline_index"]
+                finalize_pending(
+                    path,
+                    state,
+                    client,
+                    session_id,
+                    scope,
+                    now,
+                    "session-reset",
+                    forced_outcome="index-changed" if changed else "expired",
+                )
+            cause = "first-session" if source == "startup" else "session-clear"
+            state = new_state(now, cause)
+        else:
+            state["turns_since_completion"] = 0
             state["context_thresholds_seen"] = []
             state["last_context_percentage"] = None
+            add_cause(state, "post-compaction")
         write_state(path, state)
 
     if scope.router is None:
         return {}
     return additional_context("SessionStart", resume_message(source))
-
-
-def reset_after_evaluation(state: dict[str, Any], now: float) -> None:
-    state["turns_since_evaluation"] = 0
-    state["last_evaluation_at"] = now
-    state["force_evaluation"] = False
 
 
 def process_stop(
@@ -371,26 +700,94 @@ def process_stop(
         state = load_state(path, now)
 
         if event.get("stop_hook_active") is True:
-            write_state(path, state)
+            if isinstance(state.get("pending_evaluation"), dict):
+                pending = finalize_pending(path, state, client, session_id, scope, now, "stop-hook")
+                if pending is not None:
+                    return {
+                        "decision": "block",
+                        "reason": save_message(pending),
+                    }
+                queued_causes = list(state.get("force_causes", []))
+                if queued_causes:
+                    router = scope.root / ".scratch" / "CONVERSATIONS.md"
+                    pending = begin_evaluation(state, now, queued_causes, router)
+                    write_state(path, state)
+                    return {
+                        "decision": "block",
+                        "reason": save_message(pending),
+                    }
+            else:
+                write_state(path, state)
             return {}
 
-        state["turns_since_evaluation"] = int(state.get("turns_since_evaluation", 0)) + 1
-        elapsed = now - float(state.get("last_evaluation_at", now))
-        due = (
-            bool(state.get("force_evaluation"))
-            or state["turns_since_evaluation"] >= config["save_every_turns"]
-            or elapsed >= float(config["save_every_minutes"]) * 60
-        )
+        pending = state.get("pending_evaluation")
+        if isinstance(pending, dict) and pending.get("finalization") is not None:
+            recovered_retry = finish_finalization(path, state, client, session_id, scope.root)
+            if recovered_retry is not None:
+                return {
+                    "decision": "block",
+                    "reason": save_message(recovered_retry),
+                }
+            pending = state.get("pending_evaluation")
+
+        if isinstance(pending, dict):
+            age = now - float(pending["triggered_at"])
+            if age < DUPLICATE_STOP_SECONDS:
+                write_state(path, state)
+                return {}
+            if age < PENDING_STALE_SECONDS:
+                return {
+                    "decision": "block",
+                    "reason": save_message(pending),
+                }
+            original_causes = list(pending["causes"])
+            next_attempt = int(pending["attempt"]) + 1
+            router = scope.root / ".scratch" / "CONVERSATIONS.md"
+            changed = index_revision(router) != pending["baseline_index"]
+            stale_outcome = "index-changed" if changed else "expired"
+            retry_causes = merge_causes(
+                original_causes,
+                merge_causes(list(state.get("force_causes", [])), ["retry"]),
+            )
+            pending = finalize_pending(
+                path,
+                state,
+                client,
+                session_id,
+                scope,
+                now,
+                "stale-recovery",
+                forced_outcome=stale_outcome,
+                retry={"causes": retry_causes, "attempt": next_attempt},
+            )
+            if pending is None:
+                raise RuntimeError("stale continuity evaluation did not create its retry")
+            return {
+                "decision": "block",
+                "reason": save_message(pending),
+            }
+
+        state["turns_since_completion"] = int(state.get("turns_since_completion", 0)) + 1
+        elapsed = now - float(state.get("last_completed_at", now))
+        causes = list(state.get("force_causes", []))
+        if state["turns_since_completion"] >= config["save_every_turns"]:
+            causes = merge_causes(causes, ["turn-count"])
+        if elapsed >= float(config["save_every_minutes"]) * 60:
+            causes = merge_causes(causes, ["elapsed-time"])
 
         if event.get("permission_mode") == "plan":
-            if due:
-                state["force_evaluation"] = True
+            for cause in causes:
+                add_cause(state, cause)
             write_state(path, state)
             return {}
 
-        if due:
-            reset_after_evaluation(state, now)
-            response = {"decision": "block", "reason": save_message()}
+        if causes:
+            router = scope.root / ".scratch" / "CONVERSATIONS.md"
+            pending = begin_evaluation(state, now, causes, router)
+            response = {
+                "decision": "block",
+                "reason": save_message(pending),
+            }
         write_state(path, state)
     return response
 
@@ -430,19 +827,22 @@ def context_threshold_crossed(state: dict[str, Any], percentage: float, threshol
         if isinstance(item, int) and not isinstance(item, bool)
     }
     previous = state.get("last_context_percentage")
-    changed = False
+    state_changed = False
     if isinstance(previous, (int, float)) and not isinstance(previous, bool) and percentage + 25 < previous:
         seen.clear()
-        changed = True
+        state_changed = True
+    crossed = []
     for threshold in thresholds:
         if percentage >= threshold and threshold not in seen:
             seen.add(threshold)
-            changed = True
-    if not changed:
+            crossed.append(threshold)
+            state_changed = True
+    if not state_changed:
         return False
-    state["force_evaluation"] = True
     state["context_thresholds_seen"] = sorted(seen)
     state["last_context_percentage"] = percentage
+    for threshold in crossed:
+        add_cause(state, f"context-{threshold}")
     return True
 
 
@@ -487,10 +887,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("{}")
         return 0
     try:
-        event = read_json(sys.stdin)
         if args.command == "hook":
+            event = read_json(sys.stdin)
             print(json.dumps(process_hook(event, args.client, home, time.time()), separators=(",", ":")))
         else:
+            event = read_json(sys.stdin)
             rendered = process_statusline(event, home, time.time())
             if rendered:
                 print(rendered)

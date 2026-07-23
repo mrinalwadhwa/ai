@@ -4,8 +4,10 @@ description: >
   Save the current visible human-agent session into durable Project Conversation files so a later Claude or Codex
   session can resume the work. Use when the user asks to save a conversation, checkpoint progress, preserve context,
   switch agents, end a session, hand off, or prepare for context compaction; when a lifecycle instruction requests an
-  automatic save check; or, after that first check, at a material boundary in the same top-level session. Automatic
-  checks may make no changes and may continue already-authorized work. Write only managed files under .scratch. Use
+  automatic save check; or, once that path is armed, at a durable milestone with context unavailable from
+  authoritative project sources, before an intentional session pause, or when visible context is at risk. Automatic
+  checks are silent and never save recoverable live state. They save unfinished discussion only when the session is
+  intentionally pausing or visible context is at risk. Write only managed files under .scratch. Use
   resume-conversation to load.
 ---
 
@@ -21,11 +23,21 @@ Use `resume-conversation` to load the current `.scratch` projection.
 
 Use the explicit path when the user asks to save, checkpoint, switch agents, or end the session. Publish one checkpoint even when the normalized Project Conversation did not change, report what was written, and stop after saving.
 
-Use the automatic path when lifecycle context first requests a save check. That request arms proactive checks for the rest of the same top-level interactive or orchestrating session. It does not arm other sessions. Compare the visible delta with the current saved projection. Write nothing when losing that delta would not change a later agent's next action, constraints, decisions, evidence, or understanding of side effects. When a write is needed, publish it quietly and continue only the work the current request already authorizes.
+Use the automatic path when lifecycle context first requests a save check. That request arms later checks only for the same top-level interactive or orchestrating session.
 
-After the first automatic check, check again when the user changes the objective, constraints, approval, or correction; a decision or rejected alternative matters later; readiness, a blocker, or the next action changes; implementation, verification, Git, Fluent, or an external system reaches a meaningful boundary; or the session is about to pause. Cadence and context hooks are backstops, not checkpoint reasons.
+Treat an automatic check as silent maintenance. Do not announce the check, explain the materiality decision, narrate its reads or writes, report validation or success, or explain a no-op. Only report a failure or conflict required by the guardrails.
+
+After the first check, reassess at only these save conditions:
+
+- The work crosses a durable milestone and the visible delta contains a controlling fact that cannot be reconstructed from Git, project documentation, Fluent, artifacts, or a live system. Examples include user direction, a decision and its rationale, a failed attempt or lesson, and evidence or side effects.
+- The user explicitly ends, switches, or parks the session, or progress must stop for a named external event.
+- Lifecycle context identifies imminent compaction or high context pressure that puts unsaved visible context at risk.
+
+An ordinary end of turn, a question awaiting the user's next reply, and a cadence reminder are not save conditions. Cadence and turn hooks request an evaluation only. Do not initiate another check after each completed substep.
 
 Do not run the automatic path inside a delegated subagent or Fluent worker. Their parent or orchestrating session owns Project Conversation continuity.
+
+Before starting the save procedure on the automatic path, apply both gates from step 8 to the lifecycle cause and visible session. Stop the skill without inspecting saved conversations, Git, Fluent, artifacts, or live systems when either gate clearly fails. Inspect sources only when nonrecoverability is uncertain and a save condition exists. Do not gather evidence merely to justify a no-op.
 
 ## Requirements
 
@@ -171,9 +183,16 @@ Give every completion claim a bounded subject. Do not write `everything`, `all w
 
 ### 8. Decide whether the automatic path needs a checkpoint
 
-On the automatic path, compare the normalized inventory with each affected Current Conversation and its latest checkpoint. A material change exists only when a later agent would act differently or understand a controlling fact differently because of the visible delta.
+On the automatic path, publish a checkpoint only when both gates pass:
 
-Do not write a checkpoint merely because time passed, a hook ran, a tool was called, unchanged state was reread, a status question was answered, or timestamps could be refreshed. If no material change exists, do not create directories, update timestamps, or touch any conversation file. Skip to Report completion.
+1. **Nonrecoverable delta:** The visible session contains a controlling fact needed to resume that is absent from the current projection and cannot be reconstructed from Git, project documentation, Fluent, artifacts, or a live system.
+2. **Save condition:** The work reached a durable milestone, the session is intentionally pausing, or visible context is at risk.
+
+Do not checkpoint ordinary implementation progress or recoverable live state: file edits, test or build completion, commit or push state, a deploy or release asset that can be queried, tree cleanliness, an app install, permissions, a process or PID, or clipboard contents. Do not checkpoint merely because the Current Conversation's Resume became stale.
+
+Do not checkpoint an unfinished diagnosis, design discussion, or set of alternatives while an immediate user reply is expected. Wait for the decision unless the session is intentionally pausing or visible context is at risk.
+
+A hook, elapsed time, or turn count never satisfies either gate. If either gate fails, do not create directories, update timestamps, or touch any conversation file. Continue to Report completion silently.
 
 Once all canonical targets are absent or managed, the explicit path always continues to publication.
 
@@ -415,4 +434,4 @@ After validation passes and the final readback succeeds, atomically remove the r
 
 On the explicit path, tell the user which checkpoint and Current Conversations were written, which Project Conversations were affected, and which facts remain unverified. Do not paste the saved conversation into chat or resume project work in the same turn.
 
-On the automatic path, do not add a standalone report for a successful save. If a checkpoint was published, mention it only when the current response already needs to discuss the breakpoint, a conflict, or an unverified fact. If the check was a no-op, say nothing about it. Always report a publication or restoration failure. Continue or finish only the work already authorized.
+On the automatic path, a successful save and a no-op are completely silent. Do not state that a save is starting, needed, or complete; name the checkpoint; summarize validation; explain why no save was needed; or repeat the previous response or pending choices. Report only a publication or restoration failure, recovery marker, ownership conflict, or ambiguity that prevents currently authorized work. Give the exact problem, path, and next safe action. Continue or finish only work already authorized.

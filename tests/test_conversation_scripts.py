@@ -811,8 +811,11 @@ class SkillPackageTests(unittest.TestCase):
         save_root = REPO_ROOT / "skills/save-conversation"
         save_text = (save_root / "SKILL.md").read_text(encoding="utf-8")
 
-        self.assertIn("Write nothing when losing that delta would not change", save_text)
-        self.assertIn("Continue or finish only the work already authorized", save_text)
+        self.assertIn("a successful save and a no-op are completely silent", save_text)
+        self.assertIn("cannot be reconstructed from Git", save_text)
+        self.assertIn("Do not checkpoint an unfinished diagnosis, design discussion", save_text)
+        self.assertIn("Stop the skill without inspecting saved conversations", save_text)
+        self.assertIn("Continue or finish only work already authorized", save_text)
         self.assertTrue((save_root / "scripts/conversation_lock.py").is_file())
 
     def test_save_recovers_failed_publication_and_preserves_user_owned_files(self) -> None:
@@ -822,7 +825,7 @@ class SkillPackageTests(unittest.TestCase):
         self.assertIn(".scratch/_conversations/.staging/<token>/", save_text)
         self.assertIn(".scratch/_conversations/RECOVERY_REQUIRED.json", save_text)
         self.assertIn("Any failure after staging begins enters cleanup", save_text)
-        self.assertIn("Always report a publication or restoration failure", save_text)
+        self.assertIn("Report only a publication or restoration failure", save_text)
 
     def test_automatic_resume_does_not_select_unrelated_work(self) -> None:
         resume_text = (REPO_ROOT / "skills/resume-conversation/SKILL.md").read_text(encoding="utf-8")
