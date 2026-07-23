@@ -1,0 +1,476 @@
+#!/bin/sh
+
+set -eu
+umask 077
+
+usage() {
+  cat <<'EOF'
+Usage: configuration/install [--expertise-source NAME DIRECTORY]... [--instruction-source FILE]... [additional-instructions ...]
+
+Install the repository's global AGENTS.md for Claude and Codex. Additional
+instruction files are appended in the order given. Named expertise sources are
+added to the global expertise registry.
+EOF
+}
+
+configuration_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+public_instructions="$configuration_dir/agent-instructions.md"
+public_expertise=$(CDPATH='' cd -- "$configuration_dir/../expertise" && pwd)
+
+installed_dir="${HOME:?HOME must be set}/.agents"
+installed_instructions="$installed_dir/AGENTS.md"
+installed_sources="$installed_dir/AGENTS.md.sources"
+installed_digest="$installed_dir/AGENTS.md.sha256"
+claude_instructions="${HOME:?HOME must be set}/.claude/CLAUDE.md"
+codex_instructions="${CODEX_HOME:-${HOME:?HOME must be set}/.codex}/AGENTS.md"
+installed_expertise="$installed_dir/expertise"
+installed_expertise_sources="$installed_expertise/INDEX.md.sources"
+expertise_generations="$installed_dir/.expertise-generations"
+
+expertise_sources=$(mktemp "${TMPDIR:-/tmp}/ai-expertise-sources.XXXXXX")
+instruction_sources=$(mktemp "${TMPDIR:-/tmp}/ai-instruction-sources.XXXXXX")
+rendered_file=
+sources_file=
+digest_file=
+expertise_index_file=
+expertise_sources_file=
+expertise_digest_file=
+registry_hash_input=
+expertise_stage=
+expertise_link_file=
+
+cleanup() {
+  rm -f "$expertise_sources"
+  rm -f "$instruction_sources"
+  if [ -n "$rendered_file" ]; then
+    rm -f "$rendered_file"
+  fi
+  if [ -n "$sources_file" ]; then
+    rm -f "$sources_file"
+  fi
+  if [ -n "$digest_file" ]; then
+    rm -f "$digest_file"
+  fi
+  if [ -n "$expertise_index_file" ]; then
+    rm -f "$expertise_index_file"
+  fi
+  if [ -n "$expertise_sources_file" ]; then
+    rm -f "$expertise_sources_file"
+  fi
+  if [ -n "$expertise_digest_file" ]; then
+    rm -f "$expertise_digest_file"
+  fi
+  if [ -n "$registry_hash_input" ]; then
+    rm -f "$registry_hash_input"
+  fi
+  if [ -n "$expertise_stage" ] && [ -d "$expertise_stage" ]; then
+    rm -rf "$expertise_stage"
+  fi
+  if [ -n "$expertise_link_file" ]; then
+    rm -f "$expertise_link_file"
+  fi
+}
+trap cleanup EXIT HUP INT TERM
+
+add_instruction_source() {
+  instruction_source=$1
+  newline='
+'
+
+  case "$instruction_source" in
+    *"$newline"*)
+      echo "Instruction source paths cannot contain newlines: $instruction_source" >&2
+      exit 1
+      ;;
+  esac
+
+  if [ ! -f "$instruction_source" ] || [ ! -s "$instruction_source" ]; then
+    echo "Instruction source is missing or empty: $instruction_source" >&2
+    exit 1
+  fi
+
+  instruction_parent=$(CDPATH='' cd -- "$(dirname -- "$instruction_source")" && pwd)
+  instruction_name=${instruction_source##*/}
+  printf '%s/%s\n' "$instruction_parent" "$instruction_name" >> "$instruction_sources"
+}
+
+add_expertise_source() {
+  expertise_name=$1
+  expertise_directory=$2
+
+  case "$expertise_name" in
+    [a-z0-9]*) ;;
+    *)
+      echo "Expertise source names must start with a lowercase letter or number: $expertise_name" >&2
+      exit 1
+      ;;
+  esac
+
+  case "$expertise_name" in
+    *[!a-z0-9._-]*|index.md|index.md.sources|index.md.sha256)
+      echo "Invalid or reserved expertise source name: $expertise_name" >&2
+      exit 1
+      ;;
+  esac
+
+  if awk -F '\t' -v name="$expertise_name" '$1 == name { found = 1 } END { exit !found }' "$expertise_sources"; then
+    echo "Duplicate expertise source name: $expertise_name" >&2
+    exit 1
+  fi
+
+  tab=$(printf '\t')
+  newline='
+'
+  case "$expertise_directory" in
+    *"$tab"*|*"$newline"*)
+      echo "Expertise source paths cannot contain tabs or newlines: $expertise_directory" >&2
+      exit 1
+      ;;
+  esac
+
+  if [ ! -d "$expertise_directory" ] || [ ! -f "$expertise_directory/INDEX.md" ] || [ ! -s "$expertise_directory/INDEX.md" ]; then
+    echo "Expertise source must contain a nonempty INDEX.md: $expertise_directory" >&2
+    exit 1
+  fi
+
+  resolved_expertise_directory=$(CDPATH='' cd -- "$expertise_directory" && pwd)
+  printf '%s\t%s\n' "$expertise_name" "$resolved_expertise_directory" >> "$expertise_sources"
+}
+
+add_expertise_source ai "$public_expertise"
+add_instruction_source "$public_instructions"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --expertise-source)
+      if [ "$#" -lt 3 ]; then
+        echo "--expertise-source requires NAME and DIRECTORY." >&2
+        usage >&2
+        exit 1
+      fi
+      add_expertise_source "$2" "$3"
+      shift 3
+      ;;
+    --instruction-source)
+      if [ "$#" -lt 2 ]; then
+        echo "--instruction-source requires FILE." >&2
+        usage >&2
+        exit 1
+      fi
+      add_instruction_source "$2"
+      shift 2
+      ;;
+    --)
+      shift
+      for instruction_source in "$@"; do
+        add_instruction_source "$instruction_source"
+      done
+      set --
+      break
+      ;;
+    -* )
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      add_instruction_source "$1"
+      shift
+      ;;
+  esac
+done
+
+if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+  legacy_configuration_home=$XDG_CONFIG_HOME
+else
+  legacy_configuration_home="${HOME:?HOME must be set}/.config"
+fi
+legacy_dir="$legacy_configuration_home/ai"
+legacy_instructions="$legacy_dir/agent-instructions.md"
+legacy_sources="$legacy_dir/agent-instructions.sources"
+legacy_digest="$legacy_dir/agent-instructions.sha256"
+
+hash_file() {
+  file_to_hash=$1
+
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file_to_hash" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file_to_hash" | awk '{print $1}'
+  else
+    echo "Neither shasum nor sha256sum is available." >&2
+    exit 1
+  fi
+}
+
+legacy_install_is_managed=false
+if [ -f "$legacy_instructions" ] && [ -f "$legacy_sources" ] && [ -s "$legacy_digest" ]; then
+  recorded_legacy_digest=$(sed -n '1p' "$legacy_digest")
+  current_legacy_digest=$(hash_file "$legacy_instructions")
+  if [ "$recorded_legacy_digest" = "$current_legacy_digest" ]; then
+    legacy_install_is_managed=true
+  fi
+fi
+
+check_entrypoint() {
+  entrypoint=$1
+
+  if [ -L "$entrypoint" ]; then
+    linked_target=$(readlink "$entrypoint")
+    if [ "$linked_target" = "$legacy_instructions" ] && [ "$legacy_install_is_managed" = true ]; then
+      return
+    fi
+    if [ "$linked_target" != "$installed_instructions" ]; then
+      echo "Refusing to replace unmanaged symlink: $entrypoint -> $linked_target" >&2
+      exit 1
+    fi
+  elif [ -e "$entrypoint" ] && { [ ! -f "$entrypoint" ] || [ -s "$entrypoint" ]; }; then
+    echo "Refusing to replace nonempty or non-file entrypoint: $entrypoint" >&2
+    exit 1
+  fi
+}
+
+check_entrypoint "$claude_instructions"
+check_entrypoint "$codex_instructions"
+
+validate_expertise_generation() {
+  generation_directory=$1
+
+  if [ ! -d "$generation_directory" ]; then
+    echo "Expertise generation is missing: $generation_directory" >&2
+    exit 1
+  fi
+
+  generation_index="$generation_directory/INDEX.md"
+  generation_sources="$generation_directory/INDEX.md.sources"
+  generation_digest="$generation_directory/INDEX.md.sha256"
+  for generation_file in "$generation_index" "$generation_sources" "$generation_digest"; do
+    if [ -L "$generation_file" ] || [ ! -f "$generation_file" ] || [ ! -s "$generation_file" ]; then
+      echo "Expertise generation is incomplete: $generation_directory" >&2
+      exit 1
+    fi
+  done
+
+  if ! awk -F '\t' '
+    NF != 2 || $1 !~ /^[a-z0-9][a-z0-9._-]*$/ || $1 ~ /^index[.]md([.]sources|[.]sha256)?$/ || $2 == "" || seen[$1]++ { invalid = 1 }
+    END { exit invalid }
+  ' "$generation_sources"; then
+    echo "Expertise generation has an invalid source manifest: $generation_sources" >&2
+    exit 1
+  fi
+
+  registry_hash_input=$(mktemp "${TMPDIR:-/tmp}/ai-expertise-registry-hash.XXXXXX")
+  {
+    cat "$generation_index"
+    printf '\n-- expertise sources --\n'
+    cat "$generation_sources"
+  } > "$registry_hash_input"
+  current_registry_digest=$(hash_file "$registry_hash_input")
+  recorded_registry_digest=$(sed -n '1p' "$generation_digest")
+  rm -f "$registry_hash_input"
+  registry_hash_input=
+
+  if [ "$current_registry_digest" != "$recorded_registry_digest" ] || [ "${generation_directory##*/}" != "$recorded_registry_digest" ]; then
+    echo "Expertise generation has been modified: $generation_directory" >&2
+    exit 1
+  fi
+
+  while IFS="$(printf '\t')" read -r generation_name generation_source; do
+    generation_link="$generation_directory/$generation_name"
+    if [ ! -L "$generation_link" ] || [ "$(readlink "$generation_link")" != "$generation_source" ]; then
+      echo "Expertise generation has a modified source link: $generation_link" >&2
+      exit 1
+    fi
+  done < "$generation_sources"
+}
+
+expertise_needs_directory_migration=false
+if [ -L "$installed_expertise" ]; then
+  linked_expertise=$(readlink "$installed_expertise")
+  if [ "$linked_expertise" = "$public_expertise" ]; then
+    :
+  elif [ "$(dirname -- "$linked_expertise")" = "$expertise_generations" ]; then
+    validate_expertise_generation "$linked_expertise"
+  else
+    echo "Refusing to replace unmanaged expertise symlink: $installed_expertise -> $linked_expertise" >&2
+    exit 1
+  fi
+elif [ -d "$installed_expertise" ]; then
+  if find "$installed_expertise" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    echo "Refusing to replace unmanaged expertise directory: $installed_expertise" >&2
+    exit 1
+  fi
+  expertise_needs_directory_migration=true
+elif [ -e "$installed_expertise" ]; then
+  echo "Refusing to replace unmanaged expertise path: $installed_expertise" >&2
+  exit 1
+fi
+
+if [ -L "$installed_instructions" ] || { [ -e "$installed_instructions" ] && [ ! -f "$installed_instructions" ]; }; then
+  echo "Refusing to replace non-file installed instructions: $installed_instructions" >&2
+  exit 1
+fi
+
+if [ -s "$installed_instructions" ]; then
+  if [ ! -f "$installed_sources" ] || [ ! -s "$installed_digest" ]; then
+    echo "Refusing to replace unmanaged installed instructions: $installed_instructions" >&2
+    exit 1
+  fi
+
+  recorded_digest=$(sed -n '1p' "$installed_digest")
+  current_digest=$(hash_file "$installed_instructions")
+  if [ "$recorded_digest" != "$current_digest" ]; then
+    echo "Refusing to replace modified installed instructions: $installed_instructions" >&2
+    echo "Move manual changes into an instruction source, then restore the generated file." >&2
+    exit 1
+  fi
+fi
+
+mkdir -p "$installed_dir"
+rendered_file=$(mktemp "$installed_dir/.agent-instructions.XXXXXX")
+sources_file=$(mktemp "$installed_dir/.agent-instructions-sources.XXXXXX")
+digest_file=$(mktemp "$installed_dir/.agent-instructions-digest.XXXXXX")
+expertise_index_file=$(mktemp "$installed_dir/.expertise-index.XXXXXX")
+expertise_sources_file=$(mktemp "$installed_dir/.expertise-sources.XXXXXX")
+expertise_digest_file=$(mktemp "$installed_dir/.expertise-digest.XXXXXX")
+
+{
+  printf '# Expertise Sources\n\n'
+  printf 'Before starting work, read each source index listed below. Load only the files whose “Read when” condition matches the task.\n\n'
+  printf '| Source | Index |\n'
+  printf '|--------|-------|\n'
+  while IFS="$(printf '\t')" read -r expertise_name expertise_directory; do
+    printf '| %s | [%s/INDEX.md](%s/INDEX.md) |\n' "$expertise_name" "$expertise_name" "$expertise_name"
+  done < "$expertise_sources"
+} > "$expertise_index_file"
+cp "$expertise_sources" "$expertise_sources_file"
+
+registry_hash_input=$(mktemp "${TMPDIR:-/tmp}/ai-expertise-registry-hash.XXXXXX")
+{
+  cat "$expertise_index_file"
+  printf '\n-- expertise sources --\n'
+  cat "$expertise_sources_file"
+} > "$registry_hash_input"
+rendered_expertise_digest=$(hash_file "$registry_hash_input")
+printf '%s\n' "$rendered_expertise_digest" > "$expertise_digest_file"
+
+wrote_source=false
+while IFS= read -r instruction_source; do
+  printf '%s\n' "$instruction_source" >> "$sources_file"
+
+  if [ "$wrote_source" = true ]; then
+    printf '\n' >> "$rendered_file"
+  fi
+
+  cat "$instruction_source" >> "$rendered_file"
+  wrote_source=true
+done < "$instruction_sources"
+
+if [ "$wrote_source" = false ]; then
+  echo "No instruction source contains content." >&2
+  exit 1
+fi
+
+rendered_digest=$(hash_file "$rendered_file")
+printf '%s\n' "$rendered_digest" > "$digest_file"
+
+install_entrypoint() {
+  entrypoint=$1
+  mkdir -p "$(dirname -- "$entrypoint")"
+
+  if [ -L "$entrypoint" ]; then
+    linked_target=$(readlink "$entrypoint")
+    if [ "$linked_target" = "$installed_instructions" ]; then
+      return
+    fi
+    rm -f "$entrypoint"
+  fi
+
+  if [ -e "$entrypoint" ]; then
+    rm -f "$entrypoint"
+  fi
+
+  ln -s "$installed_instructions" "$entrypoint"
+}
+
+if [ -L "$expertise_generations" ] || { [ -e "$expertise_generations" ] && [ ! -d "$expertise_generations" ]; }; then
+  echo "Refusing unmanaged expertise generation path: $expertise_generations" >&2
+  exit 1
+fi
+mkdir -p "$expertise_generations"
+
+desired_expertise_generation="$expertise_generations/$rendered_expertise_digest"
+if [ -e "$desired_expertise_generation" ] || [ -L "$desired_expertise_generation" ]; then
+  validate_expertise_generation "$desired_expertise_generation"
+else
+  expertise_stage=$(mktemp -d "$expertise_generations/.generation.XXXXXX")
+  cp "$expertise_index_file" "$expertise_stage/INDEX.md"
+  cp "$expertise_sources_file" "$expertise_stage/INDEX.md.sources"
+  cp "$expertise_digest_file" "$expertise_stage/INDEX.md.sha256"
+
+  while IFS="$(printf '\t')" read -r expertise_name expertise_directory; do
+    ln -s "$expertise_directory" "$expertise_stage/$expertise_name"
+  done < "$expertise_sources"
+
+  mv "$expertise_stage" "$desired_expertise_generation"
+  expertise_stage=
+fi
+
+current_expertise_target=
+if [ -L "$installed_expertise" ]; then
+  current_expertise_target=$(readlink "$installed_expertise")
+fi
+
+if [ "$current_expertise_target" != "$desired_expertise_generation" ]; then
+  if [ "$expertise_needs_directory_migration" = true ]; then
+    rmdir "$installed_expertise"
+  fi
+
+  expertise_link_file=$(mktemp "$installed_dir/.expertise-link.XXXXXX")
+  rm -f "$expertise_link_file"
+  ln -s "$desired_expertise_generation" "$expertise_link_file"
+
+  if [ -L "$installed_expertise" ]; then
+    case "$(uname -s)" in
+      Darwin)
+        mv -fh "$expertise_link_file" "$installed_expertise"
+        ;;
+      *)
+        mv -Tf "$expertise_link_file" "$installed_expertise"
+        ;;
+    esac
+  else
+    mv "$expertise_link_file" "$installed_expertise"
+  fi
+  expertise_link_file=
+fi
+
+if [ ! -f "$installed_instructions" ] || ! cmp -s "$rendered_file" "$installed_instructions"; then
+  mv "$rendered_file" "$installed_instructions"
+fi
+
+if [ ! -f "$installed_sources" ] || ! cmp -s "$sources_file" "$installed_sources"; then
+  mv "$sources_file" "$installed_sources"
+fi
+
+if [ ! -f "$installed_digest" ] || ! cmp -s "$digest_file" "$installed_digest"; then
+  mv "$digest_file" "$installed_digest"
+fi
+
+install_entrypoint "$claude_instructions"
+install_entrypoint "$codex_instructions"
+
+echo "Installed agent instructions:"
+echo "  $claude_instructions -> $installed_instructions"
+echo "  $codex_instructions -> $installed_instructions"
+echo "Installed expertise sources:"
+while IFS="$(printf '\t')" read -r expertise_name expertise_directory; do
+  echo "  $installed_expertise/$expertise_name -> $expertise_directory"
+done < "$installed_expertise_sources"
+
+trap - EXIT HUP INT TERM
+cleanup
