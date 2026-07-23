@@ -157,7 +157,32 @@ def resolve_link(source: Path, target: str) -> Optional[Path]:
     return candidate if candidate.is_absolute() else (source.parent / candidate).resolve()
 
 
-def validate_links(path: Path, errors: list[str], warnings: list[str]) -> None:
+def link_exists(
+    target: Path,
+    canonical_root: Optional[Path],
+    overlay_root: Optional[Path],
+) -> bool:
+    if canonical_root is not None and overlay_root is not None:
+        try:
+            relative = target.relative_to(canonical_root)
+        except ValueError:
+            pass
+        else:
+            overlay = overlay_root / relative
+            if overlay.exists():
+                return True
+    return target.exists()
+
+
+def validate_links(
+    path: Path,
+    errors: list[str],
+    warnings: list[str],
+    *,
+    logical_path: Optional[Path] = None,
+    canonical_root: Optional[Path] = None,
+    overlay_root: Optional[Path] = None,
+) -> None:
     current_section: Optional[str] = None
     fence: Optional[str] = None
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -176,8 +201,8 @@ def validate_links(path: Path, errors: list[str], warnings: list[str]) -> None:
         if heading:
             current_section = heading.group(1)
         for target in LINK_RE.findall(line):
-            resolved = resolve_link(path, target)
-            if resolved is None or resolved.exists():
+            resolved = resolve_link(logical_path or path, target)
+            if resolved is None or link_exists(resolved, canonical_root, overlay_root):
                 continue
             missing_match = MISSING_LINK_RE.search(line)
             if current_section == "Legacy records" and missing_match:
@@ -343,7 +368,15 @@ def validate_current_items(
             )
 
 
-def validate_conversation(path: Path, errors: list[str], warnings: list[str]) -> Optional[dict[str, Any]]:
+def validate_conversation(
+    path: Path,
+    errors: list[str],
+    warnings: list[str],
+    *,
+    logical_path: Optional[Path] = None,
+    canonical_root: Optional[Path] = None,
+    overlay_root: Optional[Path] = None,
+) -> Optional[dict[str, Any]]:
     try:
         frontmatter, body = parse_frontmatter(path)
     except (OSError, ValueError) as error:
@@ -426,7 +459,14 @@ def validate_conversation(path: Path, errors: list[str], warnings: list[str]) ->
             except (OSError, ValueError) as error:
                 errors.append(issue("ERROR", checkpoint_path, str(error)))
 
-    validate_links(path, errors, warnings)
+    validate_links(
+        path,
+        errors,
+        warnings,
+        logical_path=logical_path,
+        canonical_root=canonical_root,
+        overlay_root=overlay_root,
+    )
     scan_risky_claims(path, warnings)
     return frontmatter
 
@@ -483,6 +523,10 @@ def validate_router(
     errors: list[str],
     warnings: list[str],
     selected: Optional[set[str]] = None,
+    *,
+    logical_path: Optional[Path] = None,
+    canonical_root: Optional[Path] = None,
+    overlay_root: Optional[Path] = None,
 ) -> Optional[int]:
     try:
         frontmatter, _ = parse_frontmatter(path)
@@ -541,7 +585,14 @@ def validate_router(
         )
         if rows != expected:
             errors.append(issue("ERROR", path, "router rows are not in status and newest-first order"))
-        validate_links(path, errors, warnings)
+        validate_links(
+            path,
+            errors,
+            warnings,
+            logical_path=logical_path,
+            canonical_root=canonical_root,
+            overlay_root=overlay_root,
+        )
     scan_risky_claims(path, warnings)
     return version
 
@@ -554,10 +605,18 @@ def validate_checkpoint(
     warnings: list[str],
     selected: Optional[set[str]] = None,
     exact_scope: bool = True,
+    *,
+    conversation_root: Optional[Path] = None,
+    logical_path: Optional[Path] = None,
+    canonical_root: Optional[Path] = None,
+    overlay_root: Optional[Path] = None,
 ) -> None:
     checkpoint_path = session_arg if session_arg.is_absolute() else project / session_arg
     checkpoint_path = checkpoint_path.resolve()
-    checkpoint_root = (project / ".scratch" / "_conversations" / "sessions").resolve()
+    checkpoint_root = (
+        conversation_root or project / ".scratch"
+    ) / "_conversations" / "sessions"
+    checkpoint_root = checkpoint_root.resolve()
     if checkpoint_path.parent != checkpoint_root:
         errors.append(issue("ERROR", checkpoint_path, "new checkpoint must be inside .scratch/_conversations/sessions"))
     name_match = SESSION_NAME_RE.match(checkpoint_path.name)
@@ -618,7 +677,14 @@ def validate_checkpoint(
                 errors.append(
                     issue("ERROR", checkpoint_path, f"{conversation_name} does not link back as latest_checkpoint")
                 )
-    validate_links(checkpoint_path, errors, warnings)
+    validate_links(
+        checkpoint_path,
+        errors,
+        warnings,
+        logical_path=logical_path,
+        canonical_root=canonical_root,
+        overlay_root=overlay_root,
+    )
     scan_risky_claims(checkpoint_path, warnings)
 
 
@@ -626,9 +692,13 @@ def validate_project(
     project: Path,
     session: Optional[Path] = None,
     selected: Optional[set[str]] = None,
+    *,
+    conversation_root: Optional[Path] = None,
 ) -> tuple[list[str], list[str]]:
     project = project.expanduser().resolve()
-    root = project / ".scratch"
+    canonical_root = project / ".scratch"
+    root = (conversation_root or canonical_root).expanduser().resolve()
+    overlay_root = root if root != canonical_root else None
     errors: list[str] = []
     warnings: list[str] = []
     if not root.is_dir():
@@ -650,7 +720,15 @@ def validate_project(
         if not conversation_path.is_file():
             errors.append(issue("ERROR", conversation_path, "selected Current Conversation does not exist"))
             continue
-        conversation = validate_conversation(conversation_path, errors, warnings)
+        logical_path = canonical_root / conversation_path.relative_to(root)
+        conversation = validate_conversation(
+            conversation_path,
+            errors,
+            warnings,
+            logical_path=logical_path,
+            canonical_root=canonical_root,
+            overlay_root=overlay_root,
+        )
         if conversation is not None:
             conversations[str(conversation.get("conversation", conversation_path.parent.name))] = conversation
         elif selected is not None:
@@ -661,11 +739,36 @@ def validate_project(
     if not router.is_file():
         errors.append(issue("ERROR", router, "managed router does not exist"))
     else:
-        router_version = validate_router(router, conversations, errors, warnings, selected)
+        router_version = validate_router(
+            router,
+            conversations,
+            errors,
+            warnings,
+            selected,
+            logical_path=canonical_root / "CONVERSATIONS.md",
+            canonical_root=canonical_root,
+            overlay_root=overlay_root,
+        )
     if session is not None:
         if router_version != SCHEMA_VERSION:
             errors.append(issue("ERROR", router, "publishing a checkpoint requires a valid Conversation Index"))
-        validate_checkpoint(project, session, conversations, errors, warnings, selected)
+        checkpoint_path = session if session.is_absolute() else project / session
+        try:
+            logical_path = canonical_root / checkpoint_path.resolve().relative_to(root)
+        except ValueError:
+            logical_path = checkpoint_path.resolve()
+        validate_checkpoint(
+            project,
+            session,
+            conversations,
+            errors,
+            warnings,
+            selected,
+            conversation_root=root,
+            logical_path=logical_path,
+            canonical_root=canonical_root,
+            overlay_root=overlay_root,
+        )
     else:
         checkpoints: dict[Path, set[str]] = {}
         for conversation_name, conversation in conversations.items():
@@ -673,6 +776,10 @@ def validate_project(
             if isinstance(checkpoint_path, Path):
                 checkpoints.setdefault(checkpoint_path, set()).add(conversation_name)
         for checkpoint_path, checkpoint_conversations in checkpoints.items():
+            try:
+                logical_path = canonical_root / checkpoint_path.relative_to(root)
+            except ValueError:
+                logical_path = checkpoint_path
             validate_checkpoint(
                 project,
                 checkpoint_path,
@@ -681,6 +788,10 @@ def validate_project(
                 warnings,
                 checkpoint_conversations,
                 exact_scope=False,
+                conversation_root=root,
+                logical_path=logical_path,
+                canonical_root=canonical_root,
+                overlay_root=overlay_root,
             )
     return errors, warnings
 

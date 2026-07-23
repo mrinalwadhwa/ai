@@ -820,12 +820,16 @@ class SkillPackageTests(unittest.TestCase):
 
     def test_save_recovers_failed_publication_and_preserves_user_owned_files(self) -> None:
         save_text = (REPO_ROOT / "skills/save-conversation/SKILL.md").read_text(encoding="utf-8")
+        publisher = REPO_ROOT / "skills/save-conversation/scripts/publish_conversation.py"
 
         self.assertIn("Never replace it in this skill", save_text)
-        self.assertIn(".scratch/_conversations/.staging/<token>/", save_text)
         self.assertIn(".scratch/_conversations/RECOVERY_REQUIRED.json", save_text)
-        self.assertIn("Any failure after staging begins enters cleanup", save_text)
-        self.assertIn("Report only a publication or restoration failure", save_text)
+        self.assertIn("as the only writer for canonical Project Conversation files", save_text)
+        self.assertIn('publish_conversation.py" recover', save_text)
+        self.assertIn('publish_conversation.py" \\\n  publish', save_text)
+        self.assertIn("`rolled-back`", save_text)
+        self.assertNotIn("<<'CONVERSATION_SAVE'\n", save_text)
+        self.assertTrue(publisher.is_file())
 
     def test_automatic_resume_does_not_select_unrelated_work(self) -> None:
         resume_text = (REPO_ROOT / "skills/resume-conversation/SKILL.md").read_text(encoding="utf-8")

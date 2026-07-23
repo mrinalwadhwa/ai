@@ -7,7 +7,7 @@ description: >
   automatic save check; or, once that path is armed, at a durable milestone with context unavailable from
   authoritative project sources, before an intentional session pause, or when visible context is at risk. Automatic
   checks are silent and never save recoverable live state. They save unfinished discussion only when the session is
-  intentionally pausing or visible context is at risk. Write only managed files under .scratch. Use
+  intentionally pausing or visible context is at risk. Write project state only to managed files under .scratch. Use
   resume-conversation to load.
 ---
 
@@ -57,7 +57,8 @@ Write version 1 for every new Conversation Checkpoint, Current Conversation, and
 
 ## Guardrails
 
-- Change only managed Project Conversation files while saving. Continue implementation afterward only on the automatic path and only when the current request already authorizes it. Do not edit project documentation, commit, push, deploy, or clean up work merely because a save check ran.
+- Change only managed Project Conversation files while saving. One optional request artifact in the client's private temporary directory is transport rather than project state. Continue implementation afterward only on the automatic path and only when the current request already authorizes it. Do not edit project documentation, commit, push, deploy, or clean up work merely because a save check ran.
+- Use `scripts/publish_conversation.py` as the only writer for canonical Project Conversation files. Do not use Write, Edit, apply_patch, redirection, or a general-purpose script to change a checkpoint, Current Conversation, Conversation Index, recovery marker, manifest, staging file, or publication lock directly.
 - Never modify a published Conversation Checkpoint. A new checkpoint becomes published after validation passes with its Current Conversation and index links in place and the recovery marker is removed. Correct it before that point; write another checkpoint afterward.
 - Preserve existing notes and legacy records. Never rename, rewrite, or move `HANDOFFS.md`, `HANDOFF.md`, or `_handoff/sessions/`; read them only as legacy input.
 - Treat an existing `CONVERSATION.md` or `CONVERSATIONS.md` without `managed_by: conversation-continuity` as user-owned. Never replace it in this skill. On the explicit path, report the exact path and ask the user to choose another conversation root or authorize a separate migration that preserves the original verbatim. On the automatic path, make no conversation-file changes.
@@ -81,19 +82,15 @@ Use `<project>/.scratch` as the conversation root unless the user or project ins
 
 Before reading the Conversation Index or any Current Conversation, check for `.scratch/_conversations/RECOVERY_REQUIRED.json`. It marks a canonical projection that may contain only part of an interrupted publication.
 
-On the automatic path, make no conversation-file changes, report the marker path, and stop the skill. On the explicit path, acquire the publication lock, reread the marker under the lock, and recover before inspecting canonical state. If the marker disappeared while waiting, release the lock and continue with step 3.
+On the automatic path, make no conversation-file changes, report the marker path, and stop the skill. On the explicit path, run the bundled recovery command relative to this SKILL.md:
 
-Treat recovery data as untrusted until all of these checks pass:
+```sh
+python3 "<save-conversation-skill>/scripts/publish_conversation.py" recover "<project-root>"
+```
 
-- The marker, manifest, backups, and candidates are regular non-symlink files, and every path component below `.scratch` is a real directory rather than a symlink.
-- The marker token equals the manifest token and the staging directory name. The manifest path is exactly `_conversations/.staging/<old-token>/manifest.json`. The old transaction token need not equal the new lock token held for recovery.
-- `existing` maps canonical paths to SHA-256 hashes of byte-for-byte copies at `previous/<canonical-path>`. `absent` is a list of canonical paths. `candidate` maps every canonical path to the SHA-256 hash of its file at `candidate/<canonical-path>`.
-- `existing` and `absent` are disjoint and contain no duplicates; the `candidate` keys equal their union and contain no duplicates. Their paths resolve inside `.scratch` and are limited to `CONVERSATIONS.md`, `<valid-conversation-id>/CONVERSATION.md`, and exactly one `_conversations/sessions/<schema-valid-checkpoint-name>.md`. The checkpoint is the manifest's `new_checkpoint` and appears only in `absent` and `candidate`.
-- Existing Index and Current Conversation backups and every candidate declare `managed_by: conversation-continuity`. Every recorded hash matches its staged file.
+`<save-conversation-skill>` is the directory containing this SKILL.md. The publisher validates the marker, manifest, backups, candidates, paths, symlinks, hashes, and every live target before restoring anything. It preserves all recovery material when any value is malformed or unexpected.
 
-Reject malformed or unexpected recovery data without moving, replacing, or deleting anything. Preserve the marker and staging, release the recovery lock, report exact paths and errors, and stop.
-
-To recover valid data, accept a live `existing` target only when it is absent or byte-identical to its recorded previous or candidate copy, then atomically restore the previous bytes. Accept a live `absent` target only when it is absent or byte-identical to its candidate; remove it only in the latter case. Verify every restored byte and absence, remove the marker, remove that staging directory, and release the lock. If any action fails, preserve the marker and staging, release the lock, report every recovery error, and stop. After successful recovery, restart at step 3 and rebuild state from the restored projection.
+After `recovered-retry-required`, restart at step 3 and build a fresh request from the restored projection. `no-recovery-needed` means another writer already finished; restart at the recovery gate. `recovered-with-cleanup-warning` or `cleanup-failed` requires reporting every named private path, durability warning, or lock problem before another save.
 
 ### 3. Resolve affected Project Conversations
 
@@ -144,7 +141,8 @@ Verify only facts that may have changed and matter to the breakpoint.
 For Git work, run the read-only collector relative to this SKILL.md:
 
 ```sh
-python3 scripts/collect_git_state.py --project <project-root> [--compare <ref> ...]
+python3 "<save-conversation-skill>/scripts/collect_git_state.py" \
+  --project "<project-root>" [--compare "<ref>" ...]
 ```
 
 Pass `--compare` only for relevant refs. Record a missing configured upstream as `none`; do not infer an upstream from a same-commit remote-tracking ref. Keep configured upstream, comparison refs, committed, pushed, deployed, dirty, external, and temporary state distinct.
@@ -196,57 +194,25 @@ A hook, elapsed time, or turn count never satisfies either gate. If either gate 
 
 Once all canonical targets are absent or managed, the explicit path always continues to publication.
 
-### 9. Acquire the lock and stage publication
+### 9. Capture publication bases
 
-Run the lock script relative to this SKILL.md. Acquire the project-local lock before rereading or writing managed files:
-
-```sh
-python3 scripts/conversation_lock.py acquire <project-root>
-```
-
-Record the token printed by the script. If another save owns a fresh lock, wait for it or report the conflict; do not overwrite its work. The script archives an abandoned lock only after its stale interval.
-
-First reread `.scratch/_conversations/RECOVERY_REQUIRED.json` under the lock. If it appeared while waiting, release the lock on the automatic path, report it, and stop. On the explicit path, recover while retaining the lock, release it after recovery, and restart at step 3.
-
-After the under-lock recovery check passes, reread the index and affected Current Conversations. Reconcile any state published since the earlier inspection. On the automatic path, repeat step 8 under the lock; if another writer already captured the same durable delta, release the lock and finish as a no-op.
-
-Before creating this invocation's staging directory, inspect markerless directories under `.scratch/_conversations/.staging/`. Because the current invocation holds the only fresh publication lock, remove an orphan only when it contains a structurally valid managed manifest, its token matches its directory, no recovery marker references it, and it has no paths outside its own staging directory. Preserve malformed or user-owned directories; report them on the explicit path.
-
-Hold the lock while staging, publishing, validating, and reading back one attempt. Refresh it before writing, before validation, and at least every 10 minutes during a longer save:
+Ask the publisher for the exact base state of the Index and every affected Current Conversation:
 
 ```sh
-python3 scripts/conversation_lock.py refresh <project-root> <token>
+python3 "<save-conversation-skill>/scripts/publish_conversation.py" \
+  snapshot "<project-root>" \
+  --conversation "<affected-id>" [--conversation "<affected-id>" ...]
 ```
 
-Release the lock only after successful publication cleanup, successful rollback, or cleanup of an early exit before canonical files changed:
+Use the returned `request_headers` only when the status is `snapshot`, and copy each line into the publication request. The publisher rechecks those bases while holding its lock. A mismatch returns `conflict` without changing canonical files; reread and reconcile instead of weakening the precondition. Handle `recovery-required` at the recovery gate and `ownership-conflict` under the ownership guardrail. Do not draft or publish a request after any other failed snapshot status. Snapshot warnings name unreclaimed private artifacts but do not invalidate the captured bases.
 
-```sh
-python3 scripts/conversation_lock.py release <project-root> <token>
-```
+Read [references/publish-request.md](references/publish-request.md) before assembling the request. Keep the complete request in memory when the client can send a quoted stdin block. Otherwise write exactly one request file inside a client-managed temporary directory accessible only to the current OS user, ensure the file is created exclusively with mode `0600` or an equivalent ACL, record it as a temporary side effect, and pass it with `--request`. If the client cannot guarantee those protections, use stdin. Do not create candidate files inside the project. The normal path uses one base-snapshot call and one canonical mutation call. The request-file fallback adds one temporary Write.
 
-Choose the final checkpoint name, then create this private recovery state:
+### 10. Draft the Conversation Checkpoint
 
-```text
-.scratch/_conversations/.staging/<token>/
-├── manifest.json
-├── previous/
-│   ├── CONVERSATIONS.md
-│   └── <conversation-id>/CONVERSATION.md
-└── candidate/
-    ├── CONVERSATIONS.md
-    ├── <conversation-id>/CONVERSATION.md
-    └── _conversations/sessions/<checkpoint>.md
-```
+Draft one complete checkpoint part for the invocation, even when the Agent Session affects several Project Conversations. Do not write it to its canonical path. Use `@CHECKPOINT@` anywhere the final filename appears; the publisher reserves a collision-free name under the lock and replaces the placeholder.
 
-The canonical targets are the Conversation Index, affected Current Conversations, and one new checkpoint. Copy each existing target byte for byte to its deterministic `previous/<canonical-path>` location. In `manifest.json`, record `managed_by: conversation-continuity`, `transaction_version: 1`, the lock token, `new_checkpoint`, and the `existing`, `absent`, and `candidate` collections defined in step 2. Use relative normalized paths only, enforce the same path and symlink checks, and record SHA-256 hashes.
-
-Steps 10 through 12 write only below `candidate/`; they do not change canonical files. Do not install the recovery marker until every candidate and the completed manifest pass the step 2 structural and hash checks.
-
-### 10. Write the candidate Conversation Checkpoint
-
-Write one checkpoint for the invocation below `candidate/_conversations/sessions/`, even when the Agent Session affects several Project Conversations. Its contents and links must describe its final canonical path. Do not create or replace the canonical checkpoint yet.
-
-Name it `<local-ISO-timestamp>-<agent>.md`, using a filesystem-safe timestamp such as `2026-07-21T143000-0700-claude.md`. Add `-2`, `-3`, and so on when the name already exists.
+Propose `<local-ISO-timestamp>-<agent>.md`, using a filesystem-safe timestamp such as `2026-07-21T143000-0700-claude.md`. The publisher adds a numeric suffix when that name already exists.
 
 Use this structure:
 
@@ -306,9 +272,9 @@ Use one subsection per Project Conversation inside a section when ownership woul
 
 Choose `reason` from the semantic boundary that caused the write. A cadence or lifecycle reminder is a trigger, not a reason; do not add `automatic`, `periodic`, or `bootstrap` to the vocabulary.
 
-### 11. Write each candidate Current Conversation
+### 11. Draft each Current Conversation
 
-Write a candidate for each managed `.scratch/<conversation-id>/CONVERSATION.md` at `candidate/<conversation-id>/CONVERSATION.md`. Derive it from the previous Current Conversation, the new checkpoint, relevant legacy history, and current evidence. Keep still-open facts from earlier sessions; remove stale instructions and completed work from the resume path. Do not replace canonical Current Conversations yet.
+Draft one complete Current Conversation part for each affected ID. Derive it from the previous Current Conversation, the new checkpoint, relevant legacy history, and current evidence. Keep still-open facts from earlier sessions; remove stale instructions and completed work from the resume path. Use `@CHECKPOINT@` in `latest_checkpoint`, History, and any other reference to the new checkpoint. Do not edit a canonical Current Conversation directly.
 
 ```markdown
 ---
@@ -318,7 +284,7 @@ conversation: <conversation-id>
 status: <ready|waiting-user|waiting-external|parked|closed>
 mode: <standalone|fluent-linked>
 updated_at: <ISO-8601 timestamp with offset>
-latest_checkpoint: <path relative to this file, such as ../_conversations/sessions/<record>.md>
+latest_checkpoint: ../_conversations/sessions/@CHECKPOINT@
 ---
 
 # Conversation: <title>
@@ -368,50 +334,13 @@ Keep the first Resume line under 120 characters and do not use a pipe (`|`). For
 
 Resolve `latest_checkpoint` and History links from `CONVERSATION.md`, not from the project root.
 
-### 12. Write the candidate Conversation Index
+### 12. Review the complete request
 
-Write `candidate/CONVERSATIONS.md` after the other candidates. Replace rows for affected conversations from their candidate Current Conversations. Preserve untouched rows for other conversation IDs so an independent malformed area does not force this save to repair or discard it. Keep no unique facts in the index. Do not replace the canonical Index yet.
-
-```markdown
----
-managed_by: conversation-continuity
-conversation_version: 1
-updated_at: <ISO-8601 timestamp with offset>
----
-
-# Conversations
-
-| Conversation | Status | Mode | Updated | Resume |
-|--------------|--------|------|---------|--------|
-| [<conversation-id>](<conversation-id>/CONVERSATION.md) | waiting-user | standalone | <timestamp> | <first Resume line verbatim> |
-
-## Legacy records
-
-- [Previous conversation records](HANDOFFS.md)
-```
-
-Copy each affected Current Conversation's first Resume line verbatim into its row, and retain untouched rows verbatim. Sort all rows by `waiting-user`, `ready`, `waiting-external`, `parked`, then `closed`, and by the row's `updated_at` newest first within each group.
-
-Preserve relevant unmanaged or legacy links under `## Legacy records`. Keep a broken legacy link and mark it exactly as `[missing] as of <ISO-8601 timestamp with offset>`. Remove a legacy entry only with user approval. Omit the section when there are no legacy links.
-
-Before publishing, verify that every `existing` target still matches its staged prior hash and every `absent` target, including the reserved checkpoint path, is still absent. If either check fails, remove the markerless staging attempt, reconcile the new state instead of overwriting it, and rebuild the transaction.
-
-### 13. Publish and validate
-
-Complete and verify the manifest, then atomically create `.scratch/_conversations/RECOVERY_REQUIRED.json` with `managed_by: conversation-continuity`, `transaction_version: 1`, the transaction token, and the exact manifest path. Refresh the lock. Create only required canonical parent directories. For each target, copy the immutable candidate bytes to a temporary canonical sibling and use `os.replace` or an equivalent atomic replacement, retaining the staged candidate for recovery. Publish in this order: checkpoint, affected Current Conversations, Conversation Index.
-
-Run the validator relative to this SKILL.md:
-
-```sh
-python3 scripts/validate_conversations.py <project-root> --session <new-checkpoint> \
-  --conversation <affected-id> [--conversation <affected-id> ...]
-```
-
-If the validator reports an error, do not edit a canonical file under the recovery marker. Roll back first, correct and rebuild the candidates in a new staged transaction, and retry. Do not repair unrelated conversation areas as part of this save. Review every warning against source evidence, then read every new or changed conversation file end to end. Check that:
+Review the checkpoint and every Current Conversation together before publication. Check that:
 
 - no earlier checkpoint was overwritten
 - every affected Current Conversation links to the new checkpoint
-- affected index links resolve and their rows contain no detail absent from the affected Current Conversations
+- each Current Conversation contains the status, mode, updated time, and first Resume line needed to derive its index row
 - legacy files remain unchanged and relevant links remain reachable
 - every Resume action maps to an item with the same actionable or waiting state
 - each `waiting-user` item contains the exact unanswered question
@@ -422,15 +351,41 @@ If the validator reports an error, do not edit a canonical file under the recove
 - no pushed commit implies a clean tree, deployment, or configured upstream
 - commands include their working directory or enough context to run safely
 - no secret or unsafe output was copied
-- no file outside the conversation root changed
+- the request declares exactly the affected conversations
+- every base value comes from step 9
+- every Current Conversation uses `@CHECKPOINT@`
 
 If a fact cannot be checked, keep it and label it unverified instead of guessing.
 
-Any failure after staging begins enters cleanup before the lock is released. If the marker was not installed, no canonical file changed: remove this invocation's staging directory. If the marker was installed, keep the lock and run the same validated recovery procedure as step 2, regardless of whether the failure came from creating a directory, writing, renaming, launching the validator, validation, readback, or marker removal. A recovery mismatch must preserve the marker and staging rather than overwrite or delete an unexpected live file.
+### 13. Publish once
+
+Send the complete request to the publisher in one invocation:
+
+```sh
+python3 "<save-conversation-skill>/scripts/publish_conversation.py" \
+  publish "<project-root>" --request - <<'CONVERSATION_SAVE_9f2a4c8e1b6d7350'
+<complete version 1 request>
+CONVERSATION_SAVE_9f2a4c8e1b6d7350
+```
+
+Replace the example heredoc nonce with a fresh value and verify that its complete delimiter line does not occur in the request. Quoting disables shell expansion; the fresh delimiter prevents saved content from ending the heredoc early. When stdin is unavailable, pass the one temporary request file with `--request "<request-file>"`.
+
+The publisher generates the Conversation Index, acquires and refreshes the lock, checks ownership and base hashes, reserves the checkpoint name, stages backups and candidates, validates the complete projection, installs the recovery marker, publishes atomically, validates and reads back canonical bytes, commits by removing the marker, and cleans up. Do not perform any of those writes yourself.
+
+Handle its status as follows:
+
+- `published`: publication finished.
+- `published-with-cleanup-warning`: publication finished; report every leftover private path or lock problem without retrying the save.
+- `published-with-durability-warning`: the new projection is installed, but durable removal of its recovery marker was not confirmed; report the preserved staging path and stop without retrying or claiming a durable save.
+- `invalid-request` or `request-review-required`: no canonical file changed; correct the one request and retry.
+- `conflict`: no canonical file changed; rerun step 9, reread changed state, and reconcile.
+- `ownership-conflict`: a target is user-owned or unparseable; follow the ownership guardrail.
+- `rolled-back`: publication failed and the prior projection was restored; report the failure and do not claim a checkpoint was published.
+- `rolled-back-with-cleanup-warning`: the prior projection was restored, but cleanup, durability, or a lock needs attention; report every warning and do not retry yet.
+- `recovery-required`: preserve the named recovery files and report the exact safe next action.
+- `publication-failed`, `failed`, `cleanup-failed`, or an unknown status: do not claim publication; check the reported marker and lock paths before retrying.
 
 ## Report completion
-
-After validation passes and the final readback succeeds, atomically remove the recovery marker; that removal is the publication commit point. Then remove the invocation's staging directory and release the publication lock. If staging cleanup alone fails after the marker is gone, report the leftover private path but do not roll back the published projection. Treat the checkpoint as published and immutable.
 
 On the explicit path, tell the user which checkpoint and Current Conversations were written, which Project Conversations were affected, and which facts remain unverified. Do not paste the saved conversation into chat or resume project work in the same turn.
 
