@@ -16,9 +16,13 @@ npx skills add mrinalwadhwa/ai --skill save-conversation --skill resume-conversa
 
 Install both conversation skills first; the lifecycle checks invoke them by name.
 
+When updating, reinstall both skills before rerunning the configuration installer so the controller and publisher stay compatible.
+
 The optional flag installs lifecycle checks for top-level Claude and Codex sessions. A new or cleared session conditionally loads matching Project Conversation state. A save check runs after the first turn, then after eight later turns or 45 minutes, and after compaction. Claude also requests checks at 70% and 85% context use when it does not already have a custom status line. Turn and time intervals start when the preceding check finishes, not when it starts.
 
 Automatic checks are silent when they succeed or make no changes. Cadence triggers an evaluation, not necessarily a checkpoint. Recoverable live state is never saved. Unfinished discussion is saved only when the session is intentionally pausing or visible context is at risk.
+
+Each save check tells a long-running session to reload the installed save skill before acting. Managed Project Conversation files are published through the skill's bundled publisher rather than separate Write or Edit calls. A needed checkpoint uses one snapshot call and one publish call, with the request passed from memory over stdin. The controller, skill, and publisher must declare the same publication protocol; an incomplete or mismatched installation stops without changing conversation files.
 
 Checks follow the project associated with the session's working directory. The controller resolves a `main/` durable checkout from its workspace container and from linked worktrees. For work deliberately conducted across another project, use an explicit save or resume request to name that project.
 

@@ -39,6 +39,16 @@ class ConversationContinuityInstallerTests(unittest.TestCase):
         self.source = REPO_ROOT / "configuration/conversation_continuity.py"
         (self.home / ".claude").mkdir(parents=True)
         self.codex_home.mkdir(parents=True)
+        self.skill_root = self.home / ".agents" / "skills" / "save-conversation"
+        (self.skill_root / "scripts").mkdir(parents=True)
+        (self.skill_root / "SKILL.md").write_text(
+            "Publication protocol: `publisher-v1`.\n",
+            encoding="utf-8",
+        )
+        (self.skill_root / "scripts" / "publish_conversation.py").write_text(
+            'PUBLISHER_PROTOCOL = "publisher-v1"\n',
+            encoding="utf-8",
+        )
 
     def write_json(self, path: Path, value) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,6 +105,18 @@ class ConversationContinuityInstallerTests(unittest.TestCase):
                         self.assertNotIn("statusMessage", handler)
         self.assertEqual(claude["statusLine"]["command"], f"{executable} statusline")
         self.assertTrue(executable.stat().st_mode & 0o100)
+
+    def test_repository_protocol_declarations_match(self) -> None:
+        publisher = REPO_ROOT / "skills/save-conversation/scripts/publish_conversation.py"
+
+        self.assertEqual(
+            installer.SAVE_PROTOCOL,
+            installer.read_protocol_assignment(self.source, "SAVE_PROTOCOL", "continuity controller"),
+        )
+        self.assertEqual(
+            installer.SAVE_PROTOCOL,
+            installer.read_protocol_assignment(publisher, "PUBLISHER_PROTOCOL", "conversation publisher"),
+        )
 
     def test_reinstall_is_idempotent(self) -> None:
         installer.install(self.source, self.home, self.codex_home)
@@ -178,7 +200,75 @@ class ConversationContinuityInstallerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "refusing to replace modified"):
             installer.install(self.source, self.home, self.codex_home)
 
+    def test_missing_save_skill_is_rejected_before_writing(self) -> None:
+        (self.skill_root / "SKILL.md").unlink()
+
+        with self.assertRaisesRegex(ValueError, "save-conversation skill is missing"):
+            installer.install(self.source, self.home, self.codex_home)
+
+        self.assertFalse((self.home / ".agents/bin/conversation-continuity").exists())
+        self.assertFalse((self.home / ".claude/settings.json").exists())
+        self.assertFalse((self.codex_home / "hooks.json").exists())
+
+    def test_mismatched_publisher_is_rejected_before_writing(self) -> None:
+        installer.install(self.source, self.home, self.codex_home)
+        targets = (
+            self.home / ".agents/bin/conversation-continuity",
+            self.home / ".agents/bin/conversation-continuity.sha256",
+            self.home / ".claude/settings.json",
+            self.codex_home / "hooks.json",
+        )
+        installed = {path: path.read_bytes() for path in targets}
+        publisher = self.skill_root / "scripts" / "publish_conversation.py"
+        publisher.write_text('PUBLISHER_PROTOCOL = "publisher-v2"\n', encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "conversation publisher protocol is incompatible: expected publisher-v1, found publisher-v2",
+        ):
+            installer.install(self.source, self.home, self.codex_home)
+
+        self.assertEqual(installed, {path: path.read_bytes() for path in targets})
+
+    def test_unadvertised_publisher_is_rejected_before_writing(self) -> None:
+        publisher = self.skill_root / "scripts" / "publish_conversation.py"
+        publisher.write_text("REQUEST_VERSION = 1\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "does not declare one literal PUBLISHER_PROTOCOL"):
+            installer.install(self.source, self.home, self.codex_home)
+
+        self.assertFalse((self.home / ".agents/bin/conversation-continuity").exists())
+        self.assertFalse((self.home / ".claude/settings.json").exists())
+        self.assertFalse((self.codex_home / "hooks.json").exists())
+
+    def test_missing_publisher_is_rejected_before_writing(self) -> None:
+        (self.skill_root / "scripts" / "publish_conversation.py").unlink()
+
+        with self.assertRaisesRegex(ValueError, "conversation publisher is missing"):
+            installer.install(self.source, self.home, self.codex_home)
+
+        self.assertFalse((self.home / ".agents/bin/conversation-continuity").exists())
+        self.assertFalse((self.home / ".claude/settings.json").exists())
+        self.assertFalse((self.codex_home / "hooks.json").exists())
+
+    def test_reinstall_upgrades_a_managed_controller(self) -> None:
+        executable = self.home / ".agents" / "bin" / "conversation-continuity"
+        digest = executable.with_suffix(".sha256")
+        executable.parent.mkdir(parents=True)
+        old_content = b"#!/usr/bin/env python3\n# old managed controller\n"
+        executable.write_bytes(old_content)
+        digest.write_text(f"{installer.file_digest(executable)}\n", encoding="utf-8")
+
+        installer.install(self.source, self.home, self.codex_home)
+
+        self.assertEqual(self.source.read_bytes(), executable.read_bytes())
+        claude = json.loads((self.home / ".claude/settings.json").read_text(encoding="utf-8"))
+        codex = json.loads((self.codex_home / "hooks.json").read_text(encoding="utf-8"))
+        self.assertEqual(1, len(claude["hooks"]["Stop"]))
+        self.assertEqual(1, len(codex["hooks"]["Stop"]))
+
     def test_base_configuration_install_does_not_add_hooks_without_flag(self) -> None:
+        (self.skill_root / "SKILL.md").unlink()
         environment = {
             **os.environ,
             "HOME": str(self.home),

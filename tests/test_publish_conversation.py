@@ -419,6 +419,7 @@ class ConversationPublisherTests(unittest.TestCase):
             result = publisher.snapshot(project, ("eval", "new-area"))
 
             self.assertEqual("snapshot", result["status"])
+            self.assertEqual("publisher-v1", result["protocol"])
             self.assertEqual("sha256", result["index"]["state"])
             self.assertEqual("sha256", result["conversations"]["eval"]["state"])
             self.assertEqual({"state": "absent"}, result["conversations"]["new-area"])

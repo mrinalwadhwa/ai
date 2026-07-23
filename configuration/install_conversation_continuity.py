@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import hashlib
 import json
@@ -14,6 +15,12 @@ import stat
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
+
+
+SAVE_PROTOCOL = "publisher-v1"
+SKILL_INSTALL_COMMAND = (
+    "npx skills add mrinalwadhwa/ai --skill save-conversation --skill resume-conversation --global"
+)
 
 
 def file_digest(path: Path) -> str:
@@ -99,6 +106,66 @@ def validate_managed_executable(destination: Path, digest_path: Path) -> None:
         raise ValueError(f"refusing to replace modified continuity executable: {destination}")
 
 
+def read_protocol_assignment(path: Path, name: str, description: str) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{description} is missing or is not a regular file: {path}")
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except SyntaxError as error:
+        raise ValueError(f"{description} is not valid Python: {path}") from error
+    values = []
+    for statement in tree.body:
+        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+            continue
+        target = statement.targets[0]
+        if isinstance(target, ast.Name) and target.id == name:
+            values.append(statement.value.value if isinstance(statement.value, ast.Constant) else None)
+    if len(values) != 1 or not isinstance(values[0], str):
+        raise ValueError(f"{description} does not declare one literal {name}: {path}")
+    return values[0]
+
+
+def validate_skill_protocol(path: Path) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(
+            f"save-conversation skill is missing or is not a regular file: {path}; "
+            f"install it with `{SKILL_INSTALL_COMMAND}`"
+        )
+    marker = f"Publication protocol: `{SAVE_PROTOCOL}`."
+    if marker not in path.read_text(encoding="utf-8").splitlines():
+        raise ValueError(
+            f"save-conversation skill does not declare {SAVE_PROTOCOL}: {path}; "
+            f"install the current skills with `{SKILL_INSTALL_COMMAND}` before installing conversation continuity"
+        )
+
+
+def validate_protocol_install(source: Path, home: Path) -> None:
+    skill = home / ".agents" / "skills" / "save-conversation" / "SKILL.md"
+    publisher = skill.parent / "scripts" / "publish_conversation.py"
+    validate_skill_protocol(skill)
+    declarations = (
+        ("continuity controller", source, "SAVE_PROTOCOL"),
+        ("conversation publisher", publisher, "PUBLISHER_PROTOCOL"),
+    )
+    for description, path, name in declarations:
+        try:
+            found = read_protocol_assignment(path, name, description)
+        except ValueError as error:
+            if description == "conversation publisher":
+                raise ValueError(f"{error}; install the current skills with `{SKILL_INSTALL_COMMAND}`") from error
+            raise
+        if found != SAVE_PROTOCOL:
+            next_action = (
+                f"install the current skills with `{SKILL_INSTALL_COMMAND}`"
+                if description == "conversation publisher"
+                else "use the continuity controller from the current repository"
+            )
+            raise ValueError(
+                f"{description} protocol is incompatible: expected {SAVE_PROTOCOL}, found {found} at {path}; "
+                + next_action
+            )
+
+
 def remove_owned_handlers(
     settings: dict[str, Any],
     owned_commands: set[str],
@@ -165,6 +232,7 @@ def install(
 ) -> list[str]:
     if source.is_symlink() or not source.is_file():
         raise ValueError(f"continuity source must be a regular file: {source}")
+    validate_protocol_install(source, home)
 
     destination = home / ".agents" / "bin" / "conversation-continuity"
     digest_path = destination.with_suffix(".sha256")

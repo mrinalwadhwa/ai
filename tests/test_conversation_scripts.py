@@ -829,6 +829,8 @@ class SkillPackageTests(unittest.TestCase):
         self.assertIn('publish_conversation.py" \\\n  publish', save_text)
         self.assertIn("`rolled-back`", save_text)
         self.assertNotIn("<<'CONVERSATION_SAVE'\n", save_text)
+        self.assertIn("Publication protocol: `publisher-v1`.", save_text)
+        self.assertIn("`protocol` is `publisher-v1`", save_text)
         self.assertTrue(publisher.is_file())
 
     def test_automatic_resume_does_not_select_unrelated_work(self) -> None:

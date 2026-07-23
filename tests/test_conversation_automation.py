@@ -635,10 +635,27 @@ class ConversationContinuityTests(unittest.TestCase):
 
         result = continuity.process_hook(self.event("Stop", stop_hook_active=False), "codex", self.home, 101)
 
+        skill = self.home / ".agents/skills/save-conversation/SKILL.md"
+        publisher = self.home / ".agents/skills/save-conversation/scripts/publish_conversation.py"
+        self.assertIn("protocol=publisher-v1", result["reason"])
+        self.assertIn(f"Reload `{skill}` from disk", result["reason"])
+        self.assertNotIn("~/.agents", result["reason"])
+        self.assertIn("do not rely on a previously loaded copy of this skill", result["reason"])
+        self.assertIn("only if it declares `publisher-v1`", result["reason"])
+        self.assertIn(f"single step 9 `snapshot` call from `{publisher}`", result["reason"])
+        self.assertIn("both to capture bases and to verify", result["reason"])
+        self.assertIn('`"protocol": "publisher-v1"`', result["reason"])
+        self.assertIn("do not run a separate protocol probe", result["reason"])
+        self.assertIn("Only that exact publisher may change canonical Project Conversation files", result["reason"])
+        self.assertIn("do not use Write or Edit on them", result["reason"])
+        self.assertIn("send it with quoted stdin; do not create a request file", result["reason"])
+        self.assertIn("report the failing path", result["reason"])
+        self.assertIn("reinstall the current save-conversation skill", result["reason"])
+        self.assertIn("make no conversation-file changes", result["reason"])
+        self.assertIn("Report only a missing or incompatible installation", result["reason"])
         self.assertIn("Do not announce or narrate the check", result["reason"])
         self.assertIn("Never save recoverable live state", result["reason"])
         self.assertIn("Save unfinished discussion only when", result["reason"])
-        self.assertIn("Only report a failure or conflict", result["reason"])
         self.assertNotIn("conversation-continuity complete", result["reason"])
 
 

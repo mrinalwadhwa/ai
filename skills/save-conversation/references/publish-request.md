@@ -44,7 +44,7 @@ python3 "<save-conversation-skill>/scripts/publish_conversation.py" \
   --conversation "<conversation-id>" [--conversation "<conversation-id>" ...]
 ```
 
-`absent` requires the target to remain absent. The publisher rejects stale values while holding its publication lock.
+Use the headers only when the response reports both `status: snapshot` and `protocol: publisher-v1`. `absent` requires the target to remain absent. The publisher rejects stale values while holding its publication lock.
 
 ## Publish in one canonical mutation call
 

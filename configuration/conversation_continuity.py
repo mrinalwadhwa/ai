@@ -20,6 +20,7 @@ from typing import Any, Iterator, Optional
 
 STATE_VERSION = 2
 EVENT_VERSION = 1
+SAVE_PROTOCOL = "publisher-v1"
 LOCK_STALE_SECONDS = 30
 LOCK_WAIT_SECONDS = 1
 DUPLICATE_STOP_SECONDS = 5
@@ -611,16 +612,27 @@ def resume_message(source: str) -> str:
     )
 
 
-def save_message(pending: dict[str, Any]) -> str:
+def save_message(home: Path, pending: dict[str, Any]) -> str:
     causes = ", ".join(pending["causes"])
+    skill_path = home / ".agents" / "skills" / "save-conversation" / "SKILL.md"
+    publisher_path = skill_path.parent / "scripts" / "publish_conversation.py"
     return (
-        f"[conversation-continuity:save-check; causes={causes}] Silently use the save-conversation automatic path. "
+        f"[conversation-continuity:save-check; protocol={SAVE_PROTOCOL}; causes={causes}] Reload "
+        f"`{skill_path}` from disk before deciding; do not rely on a previously loaded copy of this skill. Silently "
+        f"follow its automatic path only if it declares `{SAVE_PROTOCOL}`. If publication is needed, use the single "
+        f"step 9 `snapshot` call from `{publisher_path}` both to capture bases and to verify that its response reports "
+        f"`\"protocol\": \"{SAVE_PROTOCOL}\"`; do not run a separate protocol probe. Only that exact publisher may "
+        "change canonical Project Conversation files; do not use Write or Edit on them. Keep the publication request "
+        "in memory and send it with quoted stdin; do not create a request file. If either installed path is missing or "
+        "its protocol does not match, report the failing path, ask the user to reinstall the current save-conversation "
+        "skill, and make no conversation-file changes. "
         "Save only when unsaved context cannot be reconstructed from Git, project documentation, Fluent, artifacts, "
         "or live systems and the work reached a durable milestone, the session is intentionally pausing, or visible "
         "context is at risk. Never save recoverable live state. Save unfinished discussion only when the session is "
         "intentionally pausing or visible context is at risk. Do not announce or narrate the check, and do not "
-        "mention a successful save or no-op. Only report a failure or conflict required by the skill's guardrails. "
-        "Continue only work already authorized by the current request."
+        "mention a successful save or no-op. Report only a missing or incompatible installation, or a failure or "
+        "conflict required by the current skill's guardrails. Continue only work already authorized by the current "
+        "request."
     )
 
 
@@ -705,7 +717,7 @@ def process_stop(
                 if pending is not None:
                     return {
                         "decision": "block",
-                        "reason": save_message(pending),
+                        "reason": save_message(home, pending),
                     }
                 queued_causes = list(state.get("force_causes", []))
                 if queued_causes:
@@ -714,7 +726,7 @@ def process_stop(
                     write_state(path, state)
                     return {
                         "decision": "block",
-                        "reason": save_message(pending),
+                        "reason": save_message(home, pending),
                     }
             else:
                 write_state(path, state)
@@ -726,7 +738,7 @@ def process_stop(
             if recovered_retry is not None:
                 return {
                     "decision": "block",
-                    "reason": save_message(recovered_retry),
+                    "reason": save_message(home, recovered_retry),
                 }
             pending = state.get("pending_evaluation")
 
@@ -738,7 +750,7 @@ def process_stop(
             if age < PENDING_STALE_SECONDS:
                 return {
                     "decision": "block",
-                    "reason": save_message(pending),
+                    "reason": save_message(home, pending),
                 }
             original_causes = list(pending["causes"])
             next_attempt = int(pending["attempt"]) + 1
@@ -764,7 +776,7 @@ def process_stop(
                 raise RuntimeError("stale continuity evaluation did not create its retry")
             return {
                 "decision": "block",
-                "reason": save_message(pending),
+                "reason": save_message(home, pending),
             }
 
         state["turns_since_completion"] = int(state.get("turns_since_completion", 0)) + 1
@@ -786,7 +798,7 @@ def process_stop(
             pending = begin_evaluation(state, now, causes, router)
             response = {
                 "decision": "block",
-                "reason": save_message(pending),
+                "reason": save_message(home, pending),
             }
         write_state(path, state)
     return response

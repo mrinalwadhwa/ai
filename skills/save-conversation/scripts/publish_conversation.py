@@ -27,6 +27,7 @@ import validate_conversations  # noqa: E402
 
 
 MANAGER = "conversation-continuity"
+PUBLISHER_PROTOCOL = "publisher-v1"
 TRANSACTION_VERSION = 1
 REQUEST_VERSION = 1
 MAX_REQUEST_BYTES = 8 * 1024 * 1024
@@ -97,7 +98,7 @@ def sha256_file(path: Path) -> str:
 
 
 def json_output(status: str, **values: object) -> dict[str, object]:
-    return {"status": status, **values}
+    return {"status": status, "protocol": PUBLISHER_PROTOCOL, **values}
 
 
 def parse_base(value: str, field: str) -> BaseExpectation:

@@ -25,7 +25,9 @@ Use the explicit path when the user asks to save, checkpoint, switch agents, or 
 
 Use the automatic path when lifecycle context first requests a save check. That request arms later checks only for the same top-level interactive or orchestrating session.
 
-Treat an automatic check as silent maintenance. Do not announce the check, explain the materiality decision, narrate its reads or writes, report validation or success, or explain a no-op. Only report a failure or conflict required by the guardrails.
+Treat an automatic check as silent maintenance. Do not announce the check, explain the materiality decision, narrate its reads or writes, report validation or success, or explain a no-op. Report only a missing or incompatible installation, or a failure or conflict required by the guardrails.
+
+When lifecycle context names a publication protocol, require it to match the protocol declared under Requirements. A missing or different declaration means the installed skill is incompatible. Make no conversation-file changes, report this SKILL.md path, and ask the user to reinstall the current save-conversation skill.
 
 After the first check, reassess at only these save conditions:
 
@@ -42,6 +44,8 @@ Before starting the save procedure on the automatic path, apply both gates from 
 ## Requirements
 
 The bundled scripts require Python 3.9 or newer. Git is required only when collecting Git state.
+
+Publication protocol: `publisher-v1`.
 
 Write version 1 for every new Conversation Checkpoint, Current Conversation, and Conversation Index:
 
@@ -204,7 +208,7 @@ python3 "<save-conversation-skill>/scripts/publish_conversation.py" \
   --conversation "<affected-id>" [--conversation "<affected-id>" ...]
 ```
 
-Use the returned `request_headers` only when the status is `snapshot`, and copy each line into the publication request. The publisher rechecks those bases while holding its lock. A mismatch returns `conflict` without changing canonical files; reread and reconcile instead of weakening the precondition. Handle `recovery-required` at the recovery gate and `ownership-conflict` under the ownership guardrail. Do not draft or publish a request after any other failed snapshot status. Snapshot warnings name unreclaimed private artifacts but do not invalidate the captured bases.
+Use the returned `request_headers` only when the status is `snapshot` and `protocol` is `publisher-v1`, and copy each line into the publication request. Run the publisher from the directory containing this SKILL.md; a missing publisher or different protocol means the installation is incompatible. Make no conversation-file changes, report the failing path, and ask the user to reinstall the current save-conversation skill. The publisher rechecks the captured bases while holding its lock. A mismatch returns `conflict` without changing canonical files; reread and reconcile instead of weakening the precondition. Handle `recovery-required` at the recovery gate and `ownership-conflict` under the ownership guardrail. Do not draft or publish a request after any other failed snapshot status. Snapshot warnings name unreclaimed private artifacts but do not invalidate the captured bases.
 
 Read [references/publish-request.md](references/publish-request.md) before assembling the request. Keep the complete request in memory when the client can send a quoted stdin block. Otherwise write exactly one request file inside a client-managed temporary directory accessible only to the current OS user, ensure the file is created exclusively with mode `0600` or an equivalent ACL, record it as a temporary side effect, and pass it with `--request`. If the client cannot guarantee those protections, use stdin. Do not create candidate files inside the project. The normal path uses one base-snapshot call and one canonical mutation call. The request-file fallback adds one temporary Write.
 
@@ -389,4 +393,4 @@ Handle its status as follows:
 
 On the explicit path, tell the user which checkpoint and Current Conversations were written, which Project Conversations were affected, and which facts remain unverified. Do not paste the saved conversation into chat or resume project work in the same turn.
 
-On the automatic path, a successful save and a no-op are completely silent. Do not state that a save is starting, needed, or complete; name the checkpoint; summarize validation; explain why no save was needed; or repeat the previous response or pending choices. Report only a publication or restoration failure, recovery marker, ownership conflict, or ambiguity that prevents currently authorized work. Give the exact problem, path, and next safe action. Continue or finish only work already authorized.
+On the automatic path, a successful save and a no-op are completely silent. Do not state that a save is starting, needed, or complete; name the checkpoint; summarize validation; explain why no save was needed; or repeat the previous response or pending choices. Report only a missing or incompatible installation, publication or restoration failure, recovery marker, ownership conflict, or ambiguity that prevents currently authorized work. Give the exact problem, path, and next safe action. For an installation problem, name the failing installed path and ask the user to reinstall the current save-conversation skill. Continue or finish only work already authorized.
