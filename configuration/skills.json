@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "source": "mrinalwadhwa/ai",
+  "ref": "main",
+  "skills": [
+    {
+      "name": "save-conversation",
+      "path": "skills/save-conversation"
+    },
+    {
+      "name": "resume-conversation",
+      "path": "skills/resume-conversation"
+    }
+  ],
+  "retired": [
+    {
+      "name": "handoff",
+      "path": "skills/handoff",
+      "replacement": "save-conversation",
+      "owned_sources": [
+        "mrinalwadhwa/skills",
+        "mrinalwadhwa/ai"
+      ]
+    }
+  ]
+}

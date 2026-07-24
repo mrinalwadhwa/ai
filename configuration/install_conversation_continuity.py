@@ -19,7 +19,8 @@ from typing import Any, Optional
 
 SAVE_PROTOCOL = "publisher-v1"
 SKILL_INSTALL_COMMAND = (
-    "npx skills add mrinalwadhwa/ai --skill save-conversation --skill resume-conversation --global"
+    "npx skills add mrinalwadhwa/ai#main --skill save-conversation --skill resume-conversation "
+    "--agent claude-code codex --global --yes"
 )
 
 

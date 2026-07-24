@@ -1,0 +1,6 @@
+#!/bin/sh
+
+set -eu
+
+configuration_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+exec python3 "$configuration_dir/manage_installation.py" update "$@"

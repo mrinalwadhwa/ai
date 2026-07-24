@@ -5,7 +5,7 @@ Skills, expertise, and configuration for working with AI agents.
 ## Install skills
 
 ```sh
-npx skills add mrinalwadhwa/ai --skill save-conversation --skill resume-conversation --global
+npx skills add mrinalwadhwa/ai#main --skill save-conversation --skill resume-conversation --agent claude-code codex --global --yes
 ```
 
 ## Install configuration
@@ -16,7 +16,20 @@ npx skills add mrinalwadhwa/ai --skill save-conversation --skill resume-conversa
 
 Install both conversation skills first; the lifecycle checks invoke them by name.
 
-When updating, reinstall both skills before rerunning the configuration installer so the controller and publisher stay compatible.
+## Update and check the installation
+
+```sh
+./configuration/update --conversation-continuity
+./configuration/doctor --conversation-continuity
+```
+
+`update` installs the managed skills for Claude and Codex from each manifest's source branch and verifies them against the checkout before removing anything retired from those clients. It then installs the configuration and runs the doctor. Managed skill changes must be committed on that branch and available from the source repository. The command does not update the Git checkout itself.
+
+`doctor` is read-only. It checks the installed instructions, expertise registry, skill contents and provenance, retired skills, lifecycle controller, and Claude and Codex hooks.
+
+[`configuration/skills.json`](configuration/skills.json) records the source branch and directory for each managed skill. A retired entry records its former directory, replacement, and recognized source repositories; those fields determine whether `update` may remove it.
+
+A Claude session that invoked a retired skill can retain its definition after the installed skill is removed. Save the conversation, start a new session, and resume it instead of modifying the old transcript.
 
 The optional flag installs lifecycle checks for top-level Claude and Codex sessions. A new or cleared session conditionally loads matching Project Conversation state. A save check runs after the first turn, then after eight later turns or 45 minutes, and after compaction. Claude also requests checks at 70% and 85% context use when it does not already have a custom status line. Turn and time intervals start when the preceding check finishes, not when it starts.
 
