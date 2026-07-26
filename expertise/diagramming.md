@@ -22,9 +22,11 @@ Start with what the reader should learn, ground the picture in what the system a
   - Build hierarchy before decoration
   - Give color one stable meaning
   - Write labels that explain
+  - Start from the minimal technical flow template
 - Use motion to teach time or flow
 - Keep diagrams reproducible
   - Track sources, commands, and outputs
+  - Use a source-render-check pipeline
   - Keep theme variants equivalent
 - Inspect the rendered artifact
   - Review meaning before appearance
@@ -149,6 +151,8 @@ A useful sequence is:
 3. Explain gates, optional paths, and failure loops.
 4. Show deployment, operations, or storage boundaries when the reader needs them.
 
+When the teaching job is static software structure, consider the [C4 model](https://c4model.com/diagrams). Its System Context, Container, Component, and Code views provide consistent levels of zoom; use only the levels that add value. C4 is [notation-independent](https://c4model.com/diagrams/notation), but its semantics still call for a diagram type and scope, a key, explicit element types and descriptions, and labeled unidirectional relationships. Apply the project's visual grammar without dropping those conventions. Use a semantic flow for product workflows, movement through queues, authority, and feedback; use C4's supporting dynamic or deployment views only when runtime collaboration or infrastructure is the lesson.
+
 Each detailed view should feel like a zoom into the orienting picture. Use the same term for the same concept. Preserve left-to-right or top-to-bottom direction unless the new view has a reason to change it.
 
 Do not force every detail into the first picture. Orientation comes from a clear spine and visible feedback, not from seeing every component at once.
@@ -194,6 +198,36 @@ Avoid vague interface labels such as `chat with your agent` or abstract phrases 
 
 Do not write every label in uppercase. Reserve uppercase or small caps for short categorical labels when the visual system needs them. Sentence case is easier to read for explanatory copy.
 
+### Start from the minimal technical flow template
+
+When a technical flow has no established visual system, use this template as a starting point. It is an opinionated default for system and process diagrams, not a rule for architecture topology, data visualization, or every project brand.
+
+The reference palette is designed for GitHub's light and dark themes. The accent has one semantic role: information entering, moving through, or returning to the system, including learning that changes future work.
+
+| Role | Light | Dark |
+|---|---|---|
+| Canvas | `#FFFFFF` | `#0D1117` |
+| Primary text | `#1F2328` | `#E6EDF3` |
+| Icons | `#1F2328` | `#C9D1D9` |
+| Secondary text | `#59636E` | `#9EA7B3` |
+| Card frame | `#D0D7DE` | `#3D444D` |
+| Containment region | `#F6F8FA` | `#161B22` |
+| Dot grid | `#8C959F` at 20% opacity | `#30363D` at 42% opacity |
+| Flow accent | `#B45309` | `#F0883E` |
+
+Keep the two themes identical in geometry and copy. Different theme values are allowed when needed for contrast, but each token keeps the same role. Treat these values as a starting point, then verify text and graphical contrast at the final destination.
+
+Use this visual grammar:
+
+- Fill the canvas with a solid background and inset a very light dot grid by one outer margin. Do not add a decorative outer frame, gradient, shadow, or three-dimensional effect.
+- Use a monospace or technical grotesque typeface. Validate the required font family and reject fallback; pin a font file and hash when cross-machine byte stability matters. Center card titles and sentence-style descriptions; reserve uppercase and letter spacing for short categorical labels.
+- Draw cards with transparent or quiet fills, one-pixel frames, and near-square two-to-four-pixel corners. Use a pale fill without an outline for a meaningful runtime, trust, ownership, or execution region.
+- Use simple outline icons with roughly one-to-1.5-pixel strokes. Remove an icon that does not improve recognition at the final size.
+- Align equal cards to shared rows, columns, and a baseline grid. Leave enough negative space for the main path to remain visible before the body copy is read.
+- Let a left-to-right flow wrap into an orthogonal S-curve when needed. Put external signals outside the main cards and show them converging. Keep connector labels close to their source; rotate a label only when it must follow a narrow vertical path.
+- Use solid accent arrows for the main path and exchanges. Use dashed accent arrows for revision, feedback, or learning returns. Preserve each distinction with direction, line style, and text rather than color alone.
+- Omit sequence numbers when connectors already establish order. Omit logos, decorative marks, and boundaries that do not teach.
+
 ## Use motion to teach time or flow
 
 Animate only when motion explains sequence, concurrency, direction, waiting, or recurrence. Decorative movement competes with reading.
@@ -234,6 +268,39 @@ For example, a repository might keep editable SVGs in `documentation/diagrams/so
 Prefer vector or code-native source for technical diagrams. Rasterize at the dimensions required by the destination. Render from one source of truth rather than manually reproducing light and dark layouts in different tools.
 
 When paired theme sources are necessary, keep their geometry and text identical and check that only approved palette values differ.
+
+### Use a source-render-check pipeline
+
+A repository-native SVG pipeline is a practical default for technical diagrams. SVG keeps text and geometry reviewable in a diff, supports semantic classes and exact paths, and can generate the raster formats that documentation and social surfaces expect.
+
+A small repository layout is enough:
+
+```text
+documentation/diagrams/
+  README.md
+  sources/
+    overview-light.svg
+    overview-dark.svg
+scripts/render-diagrams
+documentation/assets/
+tests/diagram-assets
+```
+
+Give one manifest entry to each logical diagram. Record its source name, output dimensions, themes, and whether it is animated. Keep project-specific coordinates, frame counts, fonts, and tool versions in the diagram maintenance README rather than in general expertise.
+
+Make the renderer enforce this contract:
+
+1. Validate every expected source, required executable, and required font family before rendering. Reject silent font fallback; pin a font file and hash when cross-machine byte stability matters.
+2. Render every output into one temporary tree. Publish or copy the new assets only after all render jobs succeed, so a failed render cannot mix generations.
+3. Use the same command in a side-effect-free `--check` mode that renders to a temporary tree and compares the results with tracked outputs.
+4. Record the operating system, resolved font family or pinned font hash, rasterizer, and encoder versions that produced the accepted bytes. After a toolchain change, inspect the images before accepting new output rather than updating files only to make the check pass.
+5. Test that theme source pairs exist, expected outputs exist and are referenced, invalid animation cycles are rejected, and the freshness check passes when its tools are available.
+
+One working toolchain is `rsvg-convert` for SVG-to-PNG rendering, FFmpeg for frame assembly and palette generation, and gifsicle for GIF optimization, coordinated by a small Python script. These tools are examples, not requirements; preserve the contract if the project uses another renderer.
+
+For animation, keep the static SVG as the background and store motion tracks in its `viewBox` coordinates. Generate frame SVGs or PNGs by adding only the moving layer, then assemble them with one shared palette. This keeps the static and animated compositions synchronized while the `[0, T)` and whole-cycle rules keep the loop continuous.
+
+When the destination supports theme media queries, publish the light and dark variants through one `<picture>` element with one relationship-rich `alt` description on its fallback `<img>`. Keep a useful static output even when the primary presentation is animated.
 
 ### Keep theme variants equivalent
 
@@ -298,10 +365,10 @@ Before publishing a diagram, check:
 6. Does every arrow communicate a real direction, transfer, cause, or return?
 7. Do labels use the system's vocabulary and active phrases?
 8. Do loops, gates, optional paths, and boundaries have distinct meanings?
-9. Does each visual choice keep the same meaning across the diagram set?
+9. Does each visual choice keep the same meaning across the diagram set, or deliberately depart from the chosen template?
 10. Do light and dark variants preserve the same geometry and copy?
 11. Does animation explain behavior, cross its loop boundary continuously, remain optional, and give readers control when it lasts more than five seconds?
 12. Is the picture legible at its actual destination size?
 13. Does alt text and surrounding prose preserve the essential lesson?
-14. Are editable sources, render commands, dependencies, and published outputs tracked?
+14. Are editable sources, a manifest, render commands, dependencies, provenance, and published outputs tracked?
 15. Can an automated or repeatable check detect a stale render?
