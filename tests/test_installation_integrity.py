@@ -14,7 +14,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CONFIGURATION = REPOSITORY_ROOT / "configuration"
 MANAGER_PATH = CONFIGURATION / "manage_installation.py"
-MANAGED_SKILLS = ("save-conversation", "resume-conversation")
+MANAGED_SKILLS = ("save-conversation", "resume-conversation", "search")
 
 
 def load_manager():
@@ -331,7 +331,7 @@ lock_path.write_text(json.dumps(lock, indent=2) + "\\n", encoding="utf-8")
             invocations,
             [
                 "skills add mrinalwadhwa/ai#main --skill save-conversation "
-                "--skill resume-conversation --agent claude-code codex --global --yes",
+                "--skill resume-conversation --skill search --agent claude-code codex --global --yes",
                 "skills remove handoff --agent claude-code codex --global --yes",
             ],
         )

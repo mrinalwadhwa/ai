@@ -5,7 +5,7 @@ Skills, expertise, and configuration for working with AI agents.
 ## Install skills
 
 ```sh
-npx skills add mrinalwadhwa/ai#main --skill save-conversation --skill resume-conversation --agent claude-code codex --global --yes
+npx skills add mrinalwadhwa/ai#main --skill save-conversation --skill resume-conversation --skill search --agent claude-code codex --global --yes
 ```
 
 ## Install configuration
@@ -28,6 +28,8 @@ Install both conversation skills first; the lifecycle checks invoke them by name
 `doctor` is read-only. It checks the installed instructions, expertise registry, skill contents and provenance, retired skills, lifecycle controller, and Claude and Codex hooks.
 
 [`configuration/skills.json`](configuration/skills.json) records the source branch and directory for each managed skill. A retired entry records its former directory, replacement, and recognized source repositories; those fields determine whether `update` may remove it.
+
+The skills CLI discovers `skills/<name>/SKILL.md` through its `name` and `description` frontmatter. Global installation places the skill in `~/.agents/skills/<name>/`, which Codex discovers, and links it from `~/.claude/skills/<name>/` for Claude. The CLI records GitHub source provenance in `~/.agents/.skill-lock.json` (or `$XDG_STATE_HOME/skills/.skill-lock.json` when set). Add new managed skills to the manifest so `update` installs them and `doctor` verifies their contents and provenance.
 
 A Claude session that invoked a retired skill can retain its definition after the installed skill is removed. Save the conversation, start a new session, and resume it instead of modifying the old transcript.
 
@@ -61,3 +63,4 @@ The controller records one metadata-only JSON event for each completed check tha
 |-------|-----|
 | [save-conversation](skills/save-conversation/SKILL.md) | Save the visible agent session as durable Project Conversation state |
 | [resume-conversation](skills/resume-conversation/SKILL.md) | Load saved Project Conversation state without changing project files |
+| [search](skills/search/SKILL.md) | Search the web through Bing using agent-browser |
