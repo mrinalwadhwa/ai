@@ -1,4 +1,0 @@
-interface:
-  display_name: "Search"
-  short_description: "Search the web through Bing in a browser"
-  default_prompt: "Use $search to find web sources for this question."

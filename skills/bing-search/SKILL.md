@@ -1,9 +1,9 @@
 ---
-name: search
+name: bing-search
 description: Search the web through Bing using agent-browser and return source titles, links, and snippets. Use for web lookups, finding sources, or checking current information. Does not search local files, code, or connected private services.
 ---
 
-# Search
+# Bing Search
 
 Use the bundled [scripts/search.py](scripts/search.py), adapted from
 `~/Workspace/models/bing_search.py`. The installed copy runs independently of
@@ -19,7 +19,7 @@ Resolve the script path relative to this `SKILL.md`, then run:
 
 ```sh
 AGENT_BROWSER_HEADED=true AGENT_BROWSER_SESSION=search AGENT_BROWSER_JSON=false \
-  python3 /absolute/path/to/search/scripts/search.py --json -n 5 -- 'your query'
+  python3 /absolute/path/to/bing-search/scripts/search.py --json -n 5 -- 'your query'
 ```
 
 Quote the query as one shell argument. `--` allows queries beginning with a
